@@ -126,13 +126,15 @@ struct spotify_source {
 
 	// --- appearance settings, written by update(), read by poll thread ---
 	std::mutex settings_mutex;
-	long long text_color = 0xFFFFFFFF;
+	long long title_color = 0xFFFFFFFF;
+	long long artist_color = 0xFFFFFFFF;
 	long long bg_color = 0;
 	int bg_opacity = 92; // percent, 0-100
 	std::string font_face = "Segoe UI";
 	std::string font_style = "Regular";
 	int font_size = 16;
 	int font_flags = 0;
+	int artist_font_difference = -2;
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
 	int text_offset_y = 0; // pixels, +down / -up, relative to vertical center
@@ -160,13 +162,15 @@ struct spotify_source {
 // ---------------------------------------------------------------------
 
 struct AppearanceSettings {
-	long long text_color;
+	long long title_color;
+	long long artist_color;
 	long long bg_color;
 	int bg_opacity;
 	std::string font_face;
 	std::string font_style;
 	int font_size;
 	int font_flags;
+	int artist_font_difference;
 	int card_w;
 	int card_h;
 	int text_offset_y;
@@ -233,16 +237,15 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	FontStyle style = ParseFontStyle(s.font_style, s.font_flags);
 	int titleSize = s.font_size > 0 ? s.font_size : 16;
-	int artistSize = titleSize > 12 ? titleSize - 4 : titleSize;
+	int artistSize = titleSize > 12 ? titleSize + s.artist_font_difference : titleSize;
 
 	Font titleFont(fam, (REAL)titleSize, style, UnitPixel);
 	Font artistFont(fam, (REAL)artistSize, FontStyleRegular, UnitPixel);
 
-	Color textColor = ObsColorToGdip(s.text_color);
-	SolidBrush titleBrush(textColor);
-	// artist line uses the same text color at reduced alpha for hierarchy
-	SolidBrush artistBrush(
-		Color((BYTE)(textColor.GetA() * 0.7), textColor.GetR(), textColor.GetG(), textColor.GetB()));
+	Color titleColor = ObsColorToGdip(s.title_color);
+	Color artistColor = ObsColorToGdip(s.artist_color); 
+	SolidBrush titleBrush(titleColor);
+	SolidBrush artistBrush(artistColor);
 
 	int textX = PAD + artSize + 14;
 	int textW = cardW - textX - PAD;
@@ -296,8 +299,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->text_color, ctx->bg_color,     ctx->bg_opacity, ctx->font_face,
-				  ctx->font_style, ctx->font_size,    ctx->font_flags, ctx->card_w,
+	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color,     ctx->bg_opacity, ctx->font_face,
+				  ctx->font_style, ctx->font_size,    ctx->font_flags, ctx->artist_font_difference, ctx->card_w,
 				  ctx->card_h,     ctx->text_offset_y};
 }
 
@@ -377,7 +380,8 @@ static const char *spotify_source_get_name(void *)
 static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	ctx->text_color = obs_data_get_int(settings, "text_color");
+	ctx->title_color = obs_data_get_int(settings, "title_color");
+	ctx->artist_color = obs_data_get_int(settings, "artist_color");
 	ctx->bg_color = obs_data_get_int(settings, "bg_color");
 
 	ctx->bg_opacity = (int)obs_data_get_int(settings, "bg_opacity");
@@ -391,6 +395,9 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->text_offset_y = (int)obs_data_get_int(settings, "text_offset_y");
 	ctx->text_offset_y = std::clamp(ctx->text_offset_y, -1000, 1000);
+
+	ctx->artist_font_difference = (int)obs_data_get_int(settings, "artist_font_difference");
+	ctx->artist_font_difference = std::clamp(ctx->artist_font_difference, -50, 50);
 
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
 	if (font_obj) {
@@ -416,8 +423,9 @@ static void spotify_source_update(void *data, obs_data_t *settings)
 
 static void spotify_source_defaults(obs_data_t *settings)
 {
-	// text_color packed as R | (G<<8) | (B<<16) | (A<<24)
-	obs_data_set_default_int(settings, "text_color", 0xFFFFFFFF); // opaque white
+	// title_color packed as R | (G<<8) | (B<<16) | (A<<24)
+	obs_data_set_default_int(settings, "title_color", 0xFFFFFFFF); // opaque white
+	obs_data_set_default_int(settings, "artist_color", 0xFFFFFFFF);
 
 	// bg_color is RGB only now -- opacity is controlled separately below.
 	// Alpha byte here is irrelevant since ObsColorToGdipWithAlpha ignores it.
@@ -427,6 +435,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "card_width", DEFAULT_CARD_W);
 	obs_data_set_default_int(settings, "card_height", DEFAULT_CARD_H);
 	obs_data_set_default_int(settings, "text_offset_y", 0);
+
+	obs_data_set_default_int(settings, "artist_font_difference", -2);
 
 	obs_data_t *font_obj = obs_data_create();
 	obs_data_set_default_string(font_obj, "face", "Segoe UI");
@@ -440,13 +450,15 @@ static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_color_alpha(props, "text_color", obs_module_text("TextColor"));
-	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
-	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
+	obs_properties_add_color_alpha(props, "title_color", obs_module_text("Title Color"));
+	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("Artist Color"));
+	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
+	obs_properties_add_int(props, "bg_opacity", obs_module_text("Background Opacity"), 0, 100, 1);
 	obs_properties_add_font(props, "font", obs_module_text("Font"));
-	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
-	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
-	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
+	obs_properties_add_int(props, "artist_font_difference", obs_module_text("Artist Font Size Difference"), -50, 50, 1);
+	obs_properties_add_int(props, "card_width", obs_module_text("Card Width"), 50, 4000, 10);
+	obs_properties_add_int(props, "card_height", obs_module_text("Card Height"), 30, 2000, 10);
+	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
 
 	return props;
 }
