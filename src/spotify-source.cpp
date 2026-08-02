@@ -16,8 +16,6 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-
-
 #include "spotify-source.h"
 #include "SpotifyBridge.h"
 
@@ -37,6 +35,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <string>
 #include <chrono>
 #include <algorithm>
+#include <random>
+#include <cmath>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -51,6 +51,12 @@ constexpr int DEFAULT_CARD_H = 110;
 constexpr int PAD = 12;
 constexpr int MIN_TEXT_W = 20; // never let the text column collapse to nothing
 constexpr int MIN_ART_SIZE = 10;
+
+// VU meter geometry
+constexpr int VU_BAR_COUNT = 5;
+constexpr int VU_BAR_THICKNESS = 5;
+constexpr int VU_BAR_GAP = 3;
+constexpr int VU_GAP_BEFORE_TEXT = 10; // gap between the VU block and the text column
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -121,6 +127,62 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
+// Draws `text` inside `bounds`. If it fits, draws it normally (static). If
+// it doesn't, draws it as a looping "typewriter" marquee using
+// `scrollOffsetPx` as the current horizontal scroll position: two copies of
+// (text + a small gap) are drawn back-to-back and clipped to `bounds`, so it
+// reads as a continuously looping ticker rather than a one-shot scroll.
+// Reports back whether scrolling was needed, and the measured average
+// per-character pixel width (the poll thread uses this to advance the
+// scroll by roughly one letter per tick).
+void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds,
+			double scrollOffsetPx, bool *outNeedsScroll, double *outAvgCharPx)
+{
+	*outNeedsScroll = false;
+	if (text.empty())
+		return;
+
+	StringFormat sf;
+	sf.SetFormatFlags(StringFormatFlagsNoWrap);
+
+	RectF measured;
+	g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
+	*outAvgCharPx = std::max(1.0, (double)measured.Width / (double)text.length());
+
+	if (measured.Width <= bounds.Width) {
+		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net only, shouldn't normally trigger
+		g.DrawString(text.c_str(), -1, &font, bounds, &sf, &brush);
+		return;
+	}
+
+	*outNeedsScroll = true;
+
+	std::wstring loopText = text + L"     "; // gap before the ticker repeats
+	RectF loopMeasured;
+	g.MeasureString(loopText.c_str(), -1, &font, PointF(0, 0), &sf, &loopMeasured);
+	REAL loopWidth = loopMeasured.Width < 1.0f ? 1.0f : loopMeasured.Width;
+
+	double offset = std::fmod(scrollOffsetPx, (double)loopWidth);
+	if (offset < 0)
+		offset += loopWidth;
+
+	Region savedClip;
+	g.GetClip(&savedClip);
+	g.SetClip(bounds);
+
+	RectF r1 = bounds;
+	r1.X -= (REAL)offset;
+	r1.Width = loopWidth * 3.0f; // generous -- the clip region handles the real cutoff
+
+	g.DrawString(loopText.c_str(), -1, &font, r1, &sf, &brush);
+
+	RectF r2 = r1;
+	r2.X += loopWidth;
+	g.DrawString(loopText.c_str(), -1, &font, r2, &sf, &brush);
+
+	g.SetClip(&savedClip);
+}
+
 } // namespace
 
 struct spotify_source {
@@ -142,6 +204,11 @@ struct spotify_source {
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
 	int text_offset_y = 0;
+	int scroll_speed_ms = 300; // ms per letter for the marquee scroll
+	bool vu_meter_enabled = true;
+	long long vu_color = 0xFFFFFFFF;
+	int vu_update_ms = 250; // how often the bars pick a new "dance" target
+	int vu_randomness = 50; // percent, 0-100: how much each bar jumps toward that target per tick
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -156,8 +223,23 @@ struct spotify_source {
 	std::string last_artist;
 	std::vector<uint8_t> last_image;
 	bool have_track = false;
-};
 
+	// --- marquee scroll state (owned by the poll thread only, no mutex needed) ---
+	bool title_needs_scroll = false;
+	bool artist_needs_scroll = false;
+	double title_scroll_px = 0.0;
+	double artist_scroll_px = 0.0;
+	double title_avg_char_px = 8.0;
+	double artist_avg_char_px = 7.0;
+	std::chrono::steady_clock::time_point last_scroll_tick{};
+
+	// --- VU meter animation state (owned by the poll thread only) ---
+	double vu_bar_frac[VU_BAR_COUNT] = {0.0, 0.0, 0.0, 0.0, 0.0}; // 0..1, scaled to pixel height at draw time
+	bool is_playing = false;
+	bool vu_was_playing = false;
+	std::chrono::steady_clock::time_point last_vu_tick{};
+	std::mt19937 vu_rng{std::random_device{}()};
+};
 
 struct AppearanceSettings {
 	long long title_color;
@@ -172,6 +254,11 @@ struct AppearanceSettings {
 	int card_w;
 	int card_h;
 	int text_offset_y;
+	int scroll_speed_ms;
+	bool vu_meter_enabled;
+	long long vu_color;
+	int vu_update_ms;
+	int vu_randomness;
 };
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist,
@@ -240,18 +327,17 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	Font artistFont(fam, (REAL)artistSize, FontStyleRegular, UnitPixel);
 
 	Color titleColor = ObsColorToGdip(s.title_color);
-	Color artistColor = ObsColorToGdip(s.artist_color); 
+	Color artistColor = ObsColorToGdip(s.artist_color);
 	SolidBrush titleBrush(titleColor);
 	SolidBrush artistBrush(artistColor);
 
 	int textX = PAD + artSize + 14;
-	int textW = cardW - textX - PAD;
+	int vuBlockWidth = s.vu_meter_enabled ? (VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP +
+						 VU_GAP_BEFORE_TEXT)
+					      : 0;
+	int textW = cardW - textX - PAD - vuBlockWidth;
 	if (textW < MIN_TEXT_W)
 		textW = MIN_TEXT_W;
-
-	StringFormat sf;
-	sf.SetTrimming(StringTrimmingEllipsisCharacter);
-	sf.SetFormatFlags(StringFormatFlagsNoWrap);
 
 	std::wstring wtitle = Utf8ToWide(title);
 	std::wstring wartist = Utf8ToWide(artist);
@@ -263,10 +349,44 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	int topY = (cardH - blockH) / 2 + s.text_offset_y;
 
 	RectF titleRect((REAL)textX, (REAL)topY, (REAL)textW, (REAL)titleLineH);
-	g.DrawString(wtitle.c_str(), -1, &titleFont, titleRect, &sf, &titleBrush);
-
 	RectF artistRect((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
-	g.DrawString(wartist.c_str(), -1, &artistFont, artistRect, &sf, &artistBrush);
+
+	bool titleScroll = false, artistScroll = false;
+	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
+	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, &titleScroll,
+			   &titleAvgChar);
+	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, &artistScroll,
+			   &artistAvgChar);
+	ctx->title_needs_scroll = titleScroll;
+	ctx->artist_needs_scroll = artistScroll;
+	ctx->title_avg_char_px = titleAvgChar;
+	ctx->artist_avg_char_px = artistAvgChar;
+
+	// VU meter
+	if (s.vu_meter_enabled) {
+		int vuTotalWidth = VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP;
+		int vuMaxHeight = std::max(4, artSize / 2);
+		int vuRight = cardW - PAD;
+		int vuLeft = vuRight - vuTotalWidth;
+		int vuBaselineY = (cardH + vuMaxHeight) / 2; // bottom of the bars, block vertically centered
+
+		Color vuColor = ObsColorToGdip(s.vu_color);
+		SolidBrush vuBrush(vuColor);
+
+		for (int i = 0; i < VU_BAR_COUNT; i++) {
+			double frac = std::clamp(ctx->vu_bar_frac[i], 0.0, 1.0);
+			int barH = (int)std::lround(2.0 + frac * (double)(vuMaxHeight - 2));
+			if (barH < 2)
+				barH = 2;
+			int barX = vuLeft + i * (VU_BAR_THICKNESS + VU_BAR_GAP);
+			int barY = vuBaselineY - barH;
+
+			Rect barRect(barX, barY, VU_BAR_THICKNESS, barH);
+			GraphicsPath barPath;
+			AddRoundedRect(barPath, barRect, std::min(2, VU_BAR_THICKNESS / 2));
+			g.FillPath(&vuBrush, &barPath);
+		}
+	}
 
 	BitmapData bd;
 	Rect full(0, 0, cardW, cardH);
@@ -291,11 +411,13 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color,     ctx->bg_opacity, ctx->font_face,
-				  ctx->font_style, ctx->font_size,    ctx->font_flags, ctx->artist_font_difference, ctx->card_w,
-				  ctx->card_h,     ctx->text_offset_y};
+	return AppearanceSettings{ctx->title_color,     ctx->artist_color,     ctx->bg_color,
+				  ctx->bg_opacity,      ctx->font_face,        ctx->font_style,
+				  ctx->font_size,       ctx->font_flags,       ctx->artist_font_difference,
+				  ctx->card_w,          ctx->card_h,           ctx->text_offset_y,
+				  ctx->scroll_speed_ms, ctx->vu_meter_enabled, ctx->vu_color,
+				  ctx->vu_update_ms,    ctx->vu_randomness};
 }
-
 
 static void poll_loop(spotify_source *ctx)
 {
@@ -318,6 +440,7 @@ static void poll_loop(spotify_source *ctx)
 
 		if (has) {
 			gap_active = false;
+			ctx->is_playing = info.IsPlaying;
 
 			if (track_changed) {
 				if (info.ImageData != nullptr && info.ImageLength > 0)
@@ -327,15 +450,25 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_song = title;
 				ctx->last_artist = artist;
 				ctx->have_track = true;
+
+				// New track -- restart the marquee from the beginning.
+				ctx->title_scroll_px = 0.0;
+				ctx->artist_scroll_px = 0.0;
+				ctx->last_scroll_tick = std::chrono::steady_clock::now();
+
 				compose_bitmap(ctx, title, artist,
 					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
 					       (int)ctx->last_image.size(), snapshot_settings(ctx));
 			} else if (ctx->settings_dirty) {
+				ctx->title_scroll_px = 0.0;
+				ctx->artist_scroll_px = 0.0;
 				compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
 					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
 					       (int)ctx->last_image.size(), snapshot_settings(ctx));
 			}
-		} else if (ctx->have_track) {			
+		} else if (ctx->have_track) {
+			ctx->is_playing = false;
+
 			if (!gap_active) {
 				gap_active = true;
 				gap_start = std::chrono::steady_clock::now();
@@ -347,6 +480,8 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_image.clear();
 				ctx->have_track = false;
 				gap_active = false;
+				ctx->title_scroll_px = 0.0;
+				ctx->artist_scroll_px = 0.0;
 				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
@@ -359,9 +494,69 @@ static void poll_loop(spotify_source *ctx)
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
+		// Inner wait loop: drives the ~1s poll cadence above, but also
+		// drives the (much faster) marquee-scroll and VU-meter animation
+		// ticks in between polls, without hitting the bridge again.
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
 			if (ctx->settings_dirty)
-				break;
+				break; // let the outer loop apply the appearance change immediately
+
+			if (ctx->have_track) {
+				auto now = std::chrono::steady_clock::now();
+				bool needCompose = false;
+				AppearanceSettings s{};
+				bool haveSnapshot = false;
+
+				if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
+					if (!haveSnapshot) {
+						s = snapshot_settings(ctx);
+						haveSnapshot = true;
+					}
+					if (now - ctx->last_scroll_tick >=
+					    std::chrono::milliseconds(s.scroll_speed_ms)) {
+						ctx->last_scroll_tick = now;
+						if (ctx->title_needs_scroll)
+							ctx->title_scroll_px += ctx->title_avg_char_px;
+						if (ctx->artist_needs_scroll)
+							ctx->artist_scroll_px += ctx->artist_avg_char_px;
+						needCompose = true;
+					}
+				}
+
+				if (!haveSnapshot) {
+					s = snapshot_settings(ctx);
+					haveSnapshot = true;
+				}
+				if (s.vu_meter_enabled &&
+				    now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
+					ctx->last_vu_tick = now;
+					if (ctx->is_playing) {
+						std::uniform_real_distribution<double> dist(0.0, 1.0);
+						// randomness=100 jumps straight to a new random target each
+						// tick (the old, frantic behavior); lower values ease toward
+						// the target instead, so the bars drift rather than snap.
+						double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
+						for (int i = 0; i < VU_BAR_COUNT; i++) {
+							double target = dist(ctx->vu_rng);
+							ctx->vu_bar_frac[i] += (target - ctx->vu_bar_frac[i]) * pull;
+						}
+						ctx->vu_was_playing = true;
+						needCompose = true;
+					} else if (ctx->vu_was_playing) {
+						for (int i = 0; i < VU_BAR_COUNT; i++)
+							ctx->vu_bar_frac[i] = 0.0;
+						ctx->vu_was_playing = false;
+						needCompose = true;
+					}
+				}
+
+				if (needCompose) {
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
+						       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
+						       (int)ctx->last_image.size(), s);
+				}
+			}
+
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
 	}
@@ -401,6 +596,18 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->artist_font_difference = (int)obs_data_get_int(settings, "artist_font_difference");
 	ctx->artist_font_difference = std::clamp(ctx->artist_font_difference, -50, 50);
 
+	ctx->scroll_speed_ms = (int)obs_data_get_int(settings, "scroll_speed_ms");
+	ctx->scroll_speed_ms = std::clamp(ctx->scroll_speed_ms, 20, 5000);
+
+	ctx->vu_meter_enabled = obs_data_get_bool(settings, "vu_meter_enabled");
+	ctx->vu_color = obs_data_get_int(settings, "vu_color");
+
+	ctx->vu_update_ms = (int)obs_data_get_int(settings, "vu_update_ms");
+	ctx->vu_update_ms = std::clamp(ctx->vu_update_ms, 50, 2000);
+
+	ctx->vu_randomness = (int)obs_data_get_int(settings, "vu_randomness");
+	ctx->vu_randomness = std::clamp(ctx->vu_randomness, 0, 100);
+
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
 	if (font_obj) {
 		const char *face = obs_data_get_string(font_obj, "face");
@@ -437,6 +644,16 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_int(settings, "artist_font_difference", -2);
 
+	obs_data_set_default_int(settings, "scroll_speed_ms", 300);
+
+	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
+	// Packed R | (G<<8) | (B<<16) | (A<<24) -- a Spotify-green-ish default (#1ED760)
+	obs_data_set_default_int(settings, "vu_color",
+				 (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) |
+					     0x1E));
+	obs_data_set_default_int(settings, "vu_update_ms", 250);
+	obs_data_set_default_int(settings, "vu_randomness", 50);
+
 	obs_data_t *font_obj = obs_data_create();
 	obs_data_set_default_string(font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(font_obj, "style", "Bold");
@@ -454,10 +671,16 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("Background Opacity"), 0, 100, 1);
 	obs_properties_add_font(props, "font", obs_module_text("Font"));
-	obs_properties_add_int(props, "artist_font_difference", obs_module_text("Artist Font Size Difference"), -50, 50, 1);
+	obs_properties_add_int(props, "artist_font_difference", obs_module_text("Artist Font Size Difference"), -50, 50,
+			       1);
 	obs_properties_add_int(props, "card_width", obs_module_text("Card Width"), 50, 4000, 10);
 	obs_properties_add_int(props, "card_height", obs_module_text("Card Height"), 30, 2000, 10);
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("Scroll Speed (ms per letter)"), 20, 5000, 10);
+	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("Show VU Meter"));
+	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VU Meter Color"));
+	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VU Update Speed (ms)"), 50, 2000, 10);
+	obs_properties_add_int(props, "vu_randomness", obs_module_text("VU Randomness (%)"), 0, 100, 5);
 
 	return props;
 }
