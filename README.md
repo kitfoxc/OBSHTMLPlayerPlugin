@@ -1,6 +1,7 @@
 # Native OBS Plugin to Display Spotify Now Playing Data
 
-<img width="1071" height="1806" alt="image" src="https://github.com/user-attachments/assets/845a1de9-46e6-461f-b65a-5fe6607a1770" />
+<img width="1071" height="1998" alt="image" src="https://github.com/user-attachments/assets/1809def0-d924-4686-963e-f34f96e825da" />
+
 
 
 This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. This is all native inside of OBS.
