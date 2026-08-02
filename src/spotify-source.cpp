@@ -1,10 +1,21 @@
-// spotify-source.cpp
-//
-// An OBS custom source that polls the SpotifyBridge DLL every ~1 second
-// and renders a "now playing" card (album art + title + artist) directly
-// into the OBS scene. Text color, background color/opacity, font, card
-// size, and vertical text offset are all user-configurable via the
-// source's Properties panel.
+/*
+OBS Spotify Plugin
+Copyright (C) 2026 lingeriegoat https://github.com/lingeriegoat
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along
+with this program. If not, see <https://www.gnu.org/licenses/>
+*/
+
 
 
 #include "spotify-source.h"
@@ -66,9 +77,6 @@ void AddRoundedRect(GraphicsPath &path, const Rect &r, int radius)
 	path.CloseFigure();
 }
 
-// OBS color properties (obs_properties_add_color_alpha) are stored as
-// R | (G<<8) | (B<<16) | (A<<24) -- i.e. reading the bytes low-to-high
-// gives you R, G, B, A in that order.
 Color ObsColorToGdip(long long packed)
 {
 	uint32_t v = (uint32_t)packed;
@@ -79,9 +87,6 @@ Color ObsColorToGdip(long long packed)
 	return Color(a, r, g, b);
 }
 
-// obs_properties_add_color (no alpha) stores the same packed format, but
-// we ignore whatever alpha byte happens to be in there and substitute our
-// own opacity slider's value instead.
 Color ObsColorToGdipWithAlpha(long long packed, int opacityPercent)
 {
 	uint32_t v = (uint32_t)packed;
@@ -124,7 +129,6 @@ struct spotify_source {
 	std::thread poll_thread;
 	std::atomic<bool> running{false};
 
-	// --- appearance settings, written by update(), read by poll thread ---
 	std::mutex settings_mutex;
 	long long title_color = 0xFFFFFFFF;
 	long long artist_color = 0xFFFFFFFF;
@@ -137,29 +141,23 @@ struct spotify_source {
 	int artist_font_difference = -2;
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
-	int text_offset_y = 0; // pixels, +down / -up, relative to vertical center
+	int text_offset_y = 0;
 	std::atomic<bool> settings_dirty{true};
 
-	// --- staged bitmap, produced by poll thread, consumed by video_tick ---
 	std::mutex bitmap_mutex;
-	std::vector<uint8_t> pending_pixels; // BGRA, top-down, tightly packed
+	std::vector<uint8_t> pending_pixels;
 	uint32_t pending_w = 0, pending_h = 0;
 	std::atomic<bool> new_bitmap_ready{false};
 
 	gs_texture_t *texture = nullptr;
 	uint32_t tex_w = 0, tex_h = 0;
 
-	// --- last known track state, cached so an appearance-only change can
-	//     re-render without waiting for the track to actually change ---
 	std::string last_song;
 	std::string last_artist;
 	std::vector<uint8_t> last_image;
 	bool have_track = false;
 };
 
-// ---------------------------------------------------------------------
-// Bitmap composition (runs on the polling thread, no OBS graphics calls)
-// ---------------------------------------------------------------------
 
 struct AppearanceSettings {
 	long long title_color;
@@ -194,8 +192,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
 	g.FillPath(&bgBrush, &bgPath);
 
-	// album art (clipped to a rounded square). Sized to the card height,
-	// but capped so it never eats all the width on very narrow cards.
+	// album art
 	int artSize = cardH - PAD * 2;
 	if (artSize < MIN_ART_SIZE)
 		artSize = MIN_ART_SIZE;
@@ -252,8 +249,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	if (textW < MIN_TEXT_W)
 		textW = MIN_TEXT_W;
 
-	// GDI+ measures the string against the bounding rect for us and swaps
-	// in an ellipsis if it overflows -- no manual measurement needed.
 	StringFormat sf;
 	sf.SetTrimming(StringTrimmingEllipsisCharacter);
 	sf.SetFormatFlags(StringFormatFlagsNoWrap);
@@ -265,8 +260,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	int artistLineH = artistSize + 8;
 	int blockH = titleLineH + artistLineH;
 
-	// Vertically centered by default; text_offset_y nudges it up/down from
-	// there (negative = toward the top, positive = toward the bottom).
 	int topY = (cardH - blockH) / 2 + s.text_offset_y;
 
 	RectF titleRect((REAL)textX, (REAL)topY, (REAL)textW, (REAL)titleLineH);
@@ -275,7 +268,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	RectF artistRect((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
 	g.DrawString(wartist.c_str(), -1, &artistFont, artistRect, &sf, &artistBrush);
 
-	// lock bits and copy into a tightly packed BGRA buffer
 	BitmapData bd;
 	Rect full(0, 0, cardW, cardH);
 	if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) != Ok)
@@ -304,50 +296,60 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->card_h,     ctx->text_offset_y};
 }
 
-// ---------------------------------------------------------------------
-// Polling thread
-// ---------------------------------------------------------------------
 
 static void poll_loop(spotify_source *ctx)
 {
-	// GlobalSystemMediaTransportControlsSessionManager (WinRT) expects the
-	// calling thread to have an initialized COM apartment. std::thread gives
-	// us a bare OS thread with none, so set one up explicitly.
 	HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	bool com_initialized = SUCCEEDED(com_hr);
+
+	//Hold the last good bitmap for 2 seconds as some clients drop their session during track skip
+	constexpr auto MISSING_SESSION_GRACE = std::chrono::seconds(2);
+	bool gap_active = false;
+	std::chrono::steady_clock::time_point gap_start{};
 
 	while (ctx->running) {
 		NativeMediaInfo info{};
 		bool has = GetCurrentTrackNative(&info);
-		
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
-
 		bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) ||
 				     (artist != ctx->last_artist);
 
-		if (has && track_changed) {
-			if (info.ImageData != nullptr && info.ImageLength > 0)
-				ctx->last_image.assign(info.ImageData, info.ImageData + info.ImageLength);
-			else
+		if (has) {
+			gap_active = false;
+
+			if (track_changed) {
+				if (info.ImageData != nullptr && info.ImageLength > 0)
+					ctx->last_image.assign(info.ImageData, info.ImageData + info.ImageLength);
+				else
+					ctx->last_image.clear();
+				ctx->last_song = title;
+				ctx->last_artist = artist;
+				ctx->have_track = true;
+				compose_bitmap(ctx, title, artist,
+					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
+					       (int)ctx->last_image.size(), snapshot_settings(ctx));
+			} else if (ctx->settings_dirty) {
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
+					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
+					       (int)ctx->last_image.size(), snapshot_settings(ctx));
+			}
+		} else if (ctx->have_track) {			
+			if (!gap_active) {
+				gap_active = true;
+				gap_start = std::chrono::steady_clock::now();
+			}
+
+			if (std::chrono::steady_clock::now() - gap_start >= MISSING_SESSION_GRACE) {
+				ctx->last_song.clear();
+				ctx->last_artist.clear();
 				ctx->last_image.clear();
-
-			ctx->last_song = title;
-			ctx->last_artist = artist;
-			ctx->have_track = true;
-
-			compose_bitmap(ctx, title, artist, ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
-				       (int)ctx->last_image.size(), snapshot_settings(ctx));
-		} else if (!has && ctx->have_track) {
-			ctx->last_song.clear();
-			ctx->last_artist.clear();
-			ctx->last_image.clear();
-			ctx->have_track = false;
-
-			compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
+				ctx->have_track = false;
+				gap_active = false;
+				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
+			}
 		} else if (ctx->settings_dirty) {
-			// appearance-only change: re-render with cached track info
 			compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
 				       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
 				       (int)ctx->last_image.size(), snapshot_settings(ctx));
@@ -359,7 +361,7 @@ static void poll_loop(spotify_source *ctx)
 
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
 			if (ctx->settings_dirty)
-				break; // wake early to apply appearance changes promptly
+				break;
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
 	}
@@ -423,12 +425,9 @@ static void spotify_source_update(void *data, obs_data_t *settings)
 
 static void spotify_source_defaults(obs_data_t *settings)
 {
-	// title_color packed as R | (G<<8) | (B<<16) | (A<<24)
 	obs_data_set_default_int(settings, "title_color", 0xFFFFFFFF); // opaque white
 	obs_data_set_default_int(settings, "artist_color", 0xFFFFFFFF);
 
-	// bg_color is RGB only now -- opacity is controlled separately below.
-	// Alpha byte here is irrelevant since ObsColorToGdipWithAlpha ignores it.
 	obs_data_set_default_int(settings, "bg_color", (long long)(((uint32_t)24 << 16) | ((uint32_t)20 << 8) | 20));
 	obs_data_set_default_int(settings, "bg_opacity", 92);
 
