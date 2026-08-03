@@ -129,15 +129,35 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
+// Draws `text` inside `bounds`. If it fits, draws it normally (static). If
+// it doesn't, scrolls it left by `scrollOffsetPx` (clamped to the range that
+// keeps it fully within `bounds` at the far end) -- the poll thread is
+// responsible for advancing scrollOffsetPx toward that max, then pausing at
+// the end before resetting back to 0, rather than looping continuously.
+// Reports back whether scrolling was needed, the measured average
+// per-character pixel width (used to advance by roughly one letter per
+// tick), and the max scroll offset (the poll thread needs this to know when
+// the last letter has come fully into view).
 void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds,
-			double scrollOffsetPx, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
+			double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll, double *outAvgCharPx,
+			double *outMaxOffsetPx)
 {
 	*outNeedsScroll = false;
 	*outMaxOffsetPx = 0.0;
 	if (text.empty())
 		return;
 
-
+	// GenericTypographic (vs. the plain default StringFormat) removes the
+	// small extra margin GDI+ normally reserves around text for line-wrap
+	// layout purposes -- without it, measured.Width (and therefore where
+	// we clamp the scroll-to-end position) runs a bit past the actual
+	// visible ink, which reads as leftover blank space after the last
+	// letter. This is Microsoft's own recommended format for this exact
+	// kind of tight, single-line scrolling text.
+	//
+	// StringFormat's copy constructor is private, so Clone() is the
+	// documented way to get a mutable instance seeded from the generic
+	// typographic format; fall back to a plain default if it ever fails.
 	std::unique_ptr<StringFormat> sfClone(StringFormat::GenericTypographic()->Clone());
 	StringFormat defaultFallback;
 	StringFormat &sf = sfClone ? *sfClone : defaultFallback;
@@ -148,6 +168,11 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	*outAvgCharPx = std::max(1.0, (double)measured.Width / (double)text.length());
 
 	if (measured.Width <= bounds.Width) {
+		// Centering only makes sense when the text isn't scrolling -- once
+		// it needs to scroll, it's by definition wider than the box, so
+		// there's nothing to center.
+		if (centerWhenStatic)
+			sf.SetAlignment(StringAlignmentCenter);
 		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net only, shouldn't normally trigger
 		g.DrawString(text.c_str(), -1, &font, bounds, &sf, &brush);
 		return;
@@ -195,8 +220,9 @@ struct spotify_source {
 	int scroll_speed_ms = 300; // ms per letter for the marquee scroll
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
-	int vu_update_ms = 250; // how often the bars pick a new "dance" target
-	int vu_randomness = 50; // percent, 0-100: how much each bar jumps toward that target per tick
+	int vu_update_ms = 250;       // how often the bars pick a new "dance" target
+	int vu_randomness = 50;       // percent, 0-100: how much each bar jumps toward that target per tick
+	bool vertical_layout = false; // false = art left/text mid/VU right, true = art top/text mid/VU bottom
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -253,6 +279,7 @@ struct AppearanceSettings {
 	long long vu_color;
 	int vu_update_ms;
 	int vu_randomness;
+	bool vertical_layout;
 };
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist,
@@ -273,15 +300,119 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
 	g.FillPath(&bgBrush, &bgPath);
 
-	// album art
-	int artSize = cardH - PAD * 2;
-	if (artSize < MIN_ART_SIZE)
-		artSize = MIN_ART_SIZE;
-	int maxArtForWidth = cardW - PAD * 2 - MIN_TEXT_W;
-	if (artSize > maxArtForWidth)
-		artSize = std::max(MIN_ART_SIZE, maxArtForWidth);
+	// font metrics -- needed by both layouts before we can lay anything out
+	FontFamily requestedFam(Utf8ToWide(s.font_face).c_str());
+	const FontFamily *fam = &requestedFam;
+	if (requestedFam.GetLastStatus() != Ok)
+		fam = FontFamily::GenericSansSerif();
 
-	Rect artRect(PAD, PAD, artSize, artSize);
+	FontStyle style = ParseFontStyle(s.font_style, s.font_flags);
+	int titleSize = s.font_size > 0 ? s.font_size : 16;
+	int artistSize = titleSize > 12 ? titleSize + s.artist_font_difference : titleSize;
+
+	Font titleFont(fam, (REAL)titleSize, style, UnitPixel);
+	Font artistFont(fam, (REAL)artistSize, FontStyleRegular, UnitPixel);
+
+	Color titleColor = ObsColorToGdip(s.title_color);
+	Color artistColor = ObsColorToGdip(s.artist_color);
+	SolidBrush titleBrush(titleColor);
+	SolidBrush artistBrush(artistColor);
+
+	int titleLineH = titleSize + 10;
+	int artistLineH = artistSize + 8;
+	int blockH = titleLineH + artistLineH;
+
+	// Geometry produced by whichever layout branch runs below, then consumed
+	// by the shared drawing code that follows (art / text / VU meter don't
+	// care which layout produced their rects).
+	int artSize = 0;
+	Rect artRect;
+	RectF titleRect, artistRect;
+	bool centerText = false;
+	int vuLeft = 0, vuBaselineY = 0, vuMaxHeight = 0;
+
+	if (s.vertical_layout) {
+		// Vertical layout: album art on top, text in the middle, VU meter
+		// (still 5 vertical bars, just arranged in a row) along the bottom.
+		constexpr int GAP_ART_TEXT = 14;
+		constexpr int GAP_TEXT_VU = VU_GAP_BEFORE_TEXT;
+
+		int maxArtByWidth = cardW - PAD * 2;
+		if (maxArtByWidth < MIN_ART_SIZE)
+			maxArtByWidth = MIN_ART_SIZE;
+
+		int reservedNonArt = PAD * 2 + GAP_ART_TEXT + blockH + (s.vu_meter_enabled ? GAP_TEXT_VU : 0);
+		int remainingForArtAndVU = cardH - reservedNonArt;
+		if (remainingForArtAndVU < MIN_ART_SIZE)
+			remainingForArtAndVU = MIN_ART_SIZE;
+
+		// VU max height is defined as half the album art size (same rule as
+		// the horizontal layout), so when it's enabled the art and the VU
+		// block are splitting remainingForArtAndVU as artSize + artSize/2.
+		artSize = s.vu_meter_enabled ? (int)(remainingForArtAndVU / 1.5) : remainingForArtAndVU;
+		if (artSize > maxArtByWidth)
+			artSize = maxArtByWidth;
+		if (artSize < MIN_ART_SIZE)
+			artSize = MIN_ART_SIZE;
+
+		int artX = (cardW - artSize) / 2;
+		int artY = PAD;
+		artRect = Rect(artX, artY, artSize, artSize);
+
+		int textW = cardW - PAD * 2;
+		if (textW < MIN_TEXT_W)
+			textW = MIN_TEXT_W;
+		int textX = PAD;
+		int textTop = artY + artSize + GAP_ART_TEXT + s.text_offset_y;
+
+		titleRect = RectF((REAL)textX, (REAL)textTop, (REAL)textW, (REAL)titleLineH);
+		artistRect = RectF((REAL)textX, (REAL)(textTop + titleLineH), (REAL)textW, (REAL)artistLineH);
+
+		if (s.vu_meter_enabled) {
+			vuMaxHeight = std::max(4, artSize / 2);
+			int vuTotalWidth = VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP;
+			vuLeft = (cardW - vuTotalWidth) / 2;
+			int vuTop = textTop + titleLineH + artistLineH + GAP_TEXT_VU;
+			vuBaselineY = vuTop + vuMaxHeight;
+		}
+
+		centerText = true;
+	} else {
+		// Horizontal layout (the original): art left, text middle, VU meter
+		// far right.
+		artSize = cardH - PAD * 2;
+		if (artSize < MIN_ART_SIZE)
+			artSize = MIN_ART_SIZE;
+		int maxArtForWidth = cardW - PAD * 2 - MIN_TEXT_W;
+		if (artSize > maxArtForWidth)
+			artSize = std::max(MIN_ART_SIZE, maxArtForWidth);
+
+		artRect = Rect(PAD, PAD, artSize, artSize);
+
+		int textX = PAD + artSize + 14;
+		int vuBlockWidth = s.vu_meter_enabled ? (VU_BAR_COUNT * VU_BAR_THICKNESS +
+							 (VU_BAR_COUNT - 1) * VU_BAR_GAP + VU_GAP_BEFORE_TEXT)
+						      : 0;
+		int textW = cardW - textX - PAD - vuBlockWidth;
+		if (textW < MIN_TEXT_W)
+			textW = MIN_TEXT_W;
+
+		int topY = (cardH - blockH) / 2 + s.text_offset_y;
+		titleRect = RectF((REAL)textX, (REAL)topY, (REAL)textW, (REAL)titleLineH);
+		artistRect = RectF((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
+
+		if (s.vu_meter_enabled) {
+			int vuTotalWidth = VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP;
+			vuMaxHeight = std::max(4, artSize / 2);
+			int vuRight = cardW - PAD;
+			vuLeft = vuRight - vuTotalWidth;
+			vuBaselineY = (cardH + vuMaxHeight) / 2; // bottom of the bars, block vertically centered
+		}
+
+		centerText = false;
+	}
+
+	// album art (shared drawing code -- geometry came from whichever branch ran above)
 	GraphicsPath artClip;
 	AddRoundedRect(artClip, artRect, 8);
 
@@ -307,51 +438,17 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	}
 	g.SetClip(&savedClip);
 
-	// text
-	FontFamily requestedFam(Utf8ToWide(s.font_face).c_str());
-	const FontFamily *fam = &requestedFam;
-	if (requestedFam.GetLastStatus() != Ok)
-		fam = FontFamily::GenericSansSerif();
-
-	FontStyle style = ParseFontStyle(s.font_style, s.font_flags);
-	int titleSize = s.font_size > 0 ? s.font_size : 16;
-	int artistSize = titleSize > 12 ? titleSize + s.artist_font_difference : titleSize;
-
-	Font titleFont(fam, (REAL)titleSize, style, UnitPixel);
-	Font artistFont(fam, (REAL)artistSize, FontStyleRegular, UnitPixel);
-
-	Color titleColor = ObsColorToGdip(s.title_color);
-	Color artistColor = ObsColorToGdip(s.artist_color);
-	SolidBrush titleBrush(titleColor);
-	SolidBrush artistBrush(artistColor);
-
-	int textX = PAD + artSize + 14;
-	int vuBlockWidth = s.vu_meter_enabled ? (VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP +
-						 VU_GAP_BEFORE_TEXT)
-					      : 0;
-	int textW = cardW - textX - PAD - vuBlockWidth;
-	if (textW < MIN_TEXT_W)
-		textW = MIN_TEXT_W;
-
+	// text (shared drawing code)
 	std::wstring wtitle = Utf8ToWide(title);
 	std::wstring wartist = Utf8ToWide(artist);
-
-	int titleLineH = titleSize + 10;
-	int artistLineH = artistSize + 8;
-	int blockH = titleLineH + artistLineH;
-
-	int topY = (cardH - blockH) / 2 + s.text_offset_y;
-
-	RectF titleRect((REAL)textX, (REAL)topY, (REAL)textW, (REAL)titleLineH);
-	RectF artistRect((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
 	double titleMaxOffset = ctx->title_scroll_max_px, artistMaxOffset = ctx->artist_scroll_max_px;
-	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, &titleScroll,
+	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, &titleScroll,
 			   &titleAvgChar, &titleMaxOffset);
-	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, &artistScroll,
-			   &artistAvgChar, &artistMaxOffset);
+	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText,
+			   &artistScroll, &artistAvgChar, &artistMaxOffset);
 	ctx->title_needs_scroll = titleScroll;
 	ctx->artist_needs_scroll = artistScroll;
 	ctx->title_avg_char_px = titleAvgChar;
@@ -359,14 +456,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	ctx->title_scroll_max_px = titleMaxOffset;
 	ctx->artist_scroll_max_px = artistMaxOffset;
 
-	// VU meter
+	// VU meter (shared drawing code)
 	if (s.vu_meter_enabled) {
-		int vuTotalWidth = VU_BAR_COUNT * VU_BAR_THICKNESS + (VU_BAR_COUNT - 1) * VU_BAR_GAP;
-		int vuMaxHeight = std::max(4, artSize / 2);
-		int vuRight = cardW - PAD;
-		int vuLeft = vuRight - vuTotalWidth;
-		int vuBaselineY = (cardH + vuMaxHeight) / 2; // bottom of the bars, block vertically centered
-
 		Color vuColor = ObsColorToGdip(s.vu_color);
 		SolidBrush vuBrush(vuColor);
 
@@ -413,7 +504,7 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->font_size,       ctx->font_flags,       ctx->artist_font_difference,
 				  ctx->card_w,          ctx->card_h,           ctx->text_offset_y,
 				  ctx->scroll_speed_ms, ctx->vu_meter_enabled, ctx->vu_color,
-				  ctx->vu_update_ms,    ctx->vu_randomness};
+				  ctx->vu_update_ms,    ctx->vu_randomness,    ctx->vertical_layout};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -644,6 +735,8 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->vu_randomness = (int)obs_data_get_int(settings, "vu_randomness");
 	ctx->vu_randomness = std::clamp(ctx->vu_randomness, 0, 100);
 
+	ctx->vertical_layout = obs_data_get_bool(settings, "vertical_layout");
+
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
 	if (font_obj) {
 		const char *face = obs_data_get_string(font_obj, "face");
@@ -690,6 +783,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "vu_update_ms", 250);
 	obs_data_set_default_int(settings, "vu_randomness", 50);
 
+	obs_data_set_default_bool(settings, "vertical_layout", false);
+
 	obs_data_t *font_obj = obs_data_create();
 	obs_data_set_default_string(font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(font_obj, "style", "Bold");
@@ -717,6 +812,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VU Meter Color"));
 	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VU Update Speed (ms)"), 50, 2000, 10);
 	obs_properties_add_int(props, "vu_randomness", obs_module_text("VU Randomness (%)"), 0, 100, 5);
+	obs_properties_add_bool(props, "vertical_layout", obs_module_text("Vertical Layout"));
 
 	return props;
 }
