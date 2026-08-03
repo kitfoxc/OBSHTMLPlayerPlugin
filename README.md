@@ -1,4 +1,4 @@
-# Native OBS Plugin to Display Spotify Now Playing Data
+# Native OBS Plugin to Display Now Playing Widget
 
 <img width="1071" height="1998" alt="image" src="https://github.com/user-attachments/assets/1809def0-d924-4686-963e-f34f96e825da" />
 
@@ -10,7 +10,7 @@ Works for Spotify, YoutubeMusic desktop clients, and Apple Music. More services 
 
 # How to use
 
-Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Launch OBS and add a new source, choose the new option called SpotifyNowPlaying. Configure the settings using the built in options.
+Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory (usually something like `C:\Program Files\OBS\obs-plugins\64bit\`). Launch OBS and add a new source, choose the new option called Now Playing Widget. Configure the settings using the built in options.
 
 # Known limitations
 
