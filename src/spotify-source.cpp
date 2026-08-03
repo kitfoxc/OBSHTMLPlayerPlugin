@@ -37,6 +37,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <algorithm>
 #include <random>
 #include <cmath>
+#include <memory>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -49,7 +50,8 @@ constexpr int POLL_INTERVAL_MS = 1000;
 constexpr int DEFAULT_CARD_W = 400;
 constexpr int DEFAULT_CARD_H = 110;
 constexpr int PAD = 12;
-constexpr int MIN_TEXT_W = 20; // never let the text column collapse to nothing
+constexpr int MIN_TEXT_W = 20;                             // never let the text column collapse to nothing
+constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2); // pause once the last letter is fully visible
 constexpr int MIN_ART_SIZE = 10;
 
 // VU meter geometry
@@ -127,23 +129,19 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-// Draws `text` inside `bounds`. If it fits, draws it normally (static). If
-// it doesn't, draws it as a looping "typewriter" marquee using
-// `scrollOffsetPx` as the current horizontal scroll position: two copies of
-// (text + a small gap) are drawn back-to-back and clipped to `bounds`, so it
-// reads as a continuously looping ticker rather than a one-shot scroll.
-// Reports back whether scrolling was needed, and the measured average
-// per-character pixel width (the poll thread uses this to advance the
-// scroll by roughly one letter per tick).
 void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds,
-			double scrollOffsetPx, bool *outNeedsScroll, double *outAvgCharPx)
+			double scrollOffsetPx, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
 {
 	*outNeedsScroll = false;
+	*outMaxOffsetPx = 0.0;
 	if (text.empty())
 		return;
 
-	StringFormat sf;
-	sf.SetFormatFlags(StringFormatFlagsNoWrap);
+
+	std::unique_ptr<StringFormat> sfClone(StringFormat::GenericTypographic()->Clone());
+	StringFormat defaultFallback;
+	StringFormat &sf = sfClone ? *sfClone : defaultFallback;
+	sf.SetFormatFlags(sf.GetFormatFlags() | StringFormatFlagsNoWrap);
 
 	RectF measured;
 	g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
@@ -156,29 +154,19 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	}
 
 	*outNeedsScroll = true;
+	*outMaxOffsetPx = (double)(measured.Width - bounds.Width);
 
-	std::wstring loopText = text + L"     "; // gap before the ticker repeats
-	RectF loopMeasured;
-	g.MeasureString(loopText.c_str(), -1, &font, PointF(0, 0), &sf, &loopMeasured);
-	REAL loopWidth = loopMeasured.Width < 1.0f ? 1.0f : loopMeasured.Width;
-
-	double offset = std::fmod(scrollOffsetPx, (double)loopWidth);
-	if (offset < 0)
-		offset += loopWidth;
+	double offset = std::clamp(scrollOffsetPx, 0.0, *outMaxOffsetPx);
 
 	Region savedClip;
 	g.GetClip(&savedClip);
 	g.SetClip(bounds);
 
-	RectF r1 = bounds;
-	r1.X -= (REAL)offset;
-	r1.Width = loopWidth * 3.0f; // generous -- the clip region handles the real cutoff
+	RectF r = bounds;
+	r.X -= (REAL)offset;
+	r.Width = measured.Width + 4.0f; // wide enough for the full text; the clip does the real cropping
 
-	g.DrawString(loopText.c_str(), -1, &font, r1, &sf, &brush);
-
-	RectF r2 = r1;
-	r2.X += loopWidth;
-	g.DrawString(loopText.c_str(), -1, &font, r2, &sf, &brush);
+	g.DrawString(text.c_str(), -1, &font, r, &sf, &brush);
 
 	g.SetClip(&savedClip);
 }
@@ -231,6 +219,12 @@ struct spotify_source {
 	double artist_scroll_px = 0.0;
 	double title_avg_char_px = 8.0;
 	double artist_avg_char_px = 7.0;
+	double title_scroll_max_px = 0.0;
+	double artist_scroll_max_px = 0.0;
+	bool title_scroll_paused = false;
+	bool artist_scroll_paused = false;
+	std::chrono::steady_clock::time_point title_pause_start{};
+	std::chrono::steady_clock::time_point artist_pause_start{};
 	std::chrono::steady_clock::time_point last_scroll_tick{};
 
 	// --- VU meter animation state (owned by the poll thread only) ---
@@ -353,14 +347,17 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
+	double titleMaxOffset = ctx->title_scroll_max_px, artistMaxOffset = ctx->artist_scroll_max_px;
 	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, &titleScroll,
-			   &titleAvgChar);
+			   &titleAvgChar, &titleMaxOffset);
 	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, &artistScroll,
-			   &artistAvgChar);
+			   &artistAvgChar, &artistMaxOffset);
 	ctx->title_needs_scroll = titleScroll;
 	ctx->artist_needs_scroll = artistScroll;
 	ctx->title_avg_char_px = titleAvgChar;
 	ctx->artist_avg_char_px = artistAvgChar;
+	ctx->title_scroll_max_px = titleMaxOffset;
+	ctx->artist_scroll_max_px = artistMaxOffset;
 
 	// VU meter
 	if (s.vu_meter_enabled) {
@@ -454,6 +451,8 @@ static void poll_loop(spotify_source *ctx)
 				// New track -- restart the marquee from the beginning.
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
+				ctx->title_scroll_paused = false;
+				ctx->artist_scroll_paused = false;
 				ctx->last_scroll_tick = std::chrono::steady_clock::now();
 
 				compose_bitmap(ctx, title, artist,
@@ -462,6 +461,8 @@ static void poll_loop(spotify_source *ctx)
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
+				ctx->title_scroll_paused = false;
+				ctx->artist_scroll_paused = false;
 				compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
 					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
 					       (int)ctx->last_image.size(), snapshot_settings(ctx));
@@ -482,6 +483,8 @@ static void poll_loop(spotify_source *ctx)
 				gap_active = false;
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
+				ctx->title_scroll_paused = false;
+				ctx->artist_scroll_paused = false;
 				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
@@ -515,11 +518,44 @@ static void poll_loop(spotify_source *ctx)
 					if (now - ctx->last_scroll_tick >=
 					    std::chrono::milliseconds(s.scroll_speed_ms)) {
 						ctx->last_scroll_tick = now;
-						if (ctx->title_needs_scroll)
-							ctx->title_scroll_px += ctx->title_avg_char_px;
-						if (ctx->artist_needs_scroll)
-							ctx->artist_scroll_px += ctx->artist_avg_char_px;
-						needCompose = true;
+
+						if (ctx->title_needs_scroll) {
+							if (ctx->title_scroll_paused) {
+								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
+									ctx->title_scroll_px = 0.0;
+									ctx->title_scroll_paused = false;
+									needCompose = true;
+								}
+							} else {
+								ctx->title_scroll_px += ctx->title_avg_char_px;
+								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
+									ctx->title_scroll_px = ctx->title_scroll_max_px;
+									ctx->title_scroll_paused = true;
+									ctx->title_pause_start = now;
+								}
+								needCompose = true;
+							}
+						}
+
+						if (ctx->artist_needs_scroll) {
+							if (ctx->artist_scroll_paused) {
+								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
+									ctx->artist_scroll_px = 0.0;
+									ctx->artist_scroll_paused = false;
+									needCompose = true;
+								}
+							} else {
+								ctx->artist_scroll_px += ctx->artist_avg_char_px;
+								if (ctx->artist_scroll_px >=
+								    ctx->artist_scroll_max_px) {
+									ctx->artist_scroll_px =
+										ctx->artist_scroll_max_px;
+									ctx->artist_scroll_paused = true;
+									ctx->artist_pause_start = now;
+								}
+								needCompose = true;
+							}
+						}
 					}
 				}
 
