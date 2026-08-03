@@ -697,7 +697,7 @@ static void poll_loop(spotify_source *ctx)
 
 static const char *spotify_source_get_name(void *)
 {
-	return obs_module_text("SpotifyNowPlaying");
+	return obs_module_text("Now Playing Widget");
 }
 
 static void apply_settings(spotify_source *ctx, obs_data_t *settings)
