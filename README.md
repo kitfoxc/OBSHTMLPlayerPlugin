@@ -8,7 +8,7 @@ This plugin allows you to have a native "now playing" widget inside of OBS. No n
 
 # How to use
 
-Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Add the new source inside, it is called SpotifyNowPlaying. Configure using the built in options.
+Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Launch OBS and add a new source, choose the new option called SpotifyNowPlaying. Configure the settings using the built in options.
 
 # Known limitations
 
