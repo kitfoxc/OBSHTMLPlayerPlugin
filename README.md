@@ -6,6 +6,8 @@
 
 This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. This is all native inside of OBS.
 
+Works for Spotify, YoutubeMusic desktop clients, and Apple Music. More services may be added later if they are requested and I can reasonably get a copy of the program.
+
 # How to use
 
 Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Launch OBS and add a new source, choose the new option called SpotifyNowPlaying. Configure the settings using the built in options.
@@ -13,7 +15,6 @@ Download the latest release from the releases page. Unzip, and put all 4 files i
 # Known limitations
 
 Only works on windows. 
-Only works for spotify. Might add youtube music later, but other services are unlikely since im not going to pay for them and I only have spotify and youtube.
 
 # Troubleshooting
 
