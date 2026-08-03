@@ -25,7 +25,7 @@ You will also need VC 2015-2022 runtime, which you can also download from micros
 
 You may also need the VC Redist 2015, which is again hosted by microsoft and can be found here: https://www.microsoft.com/en-ie/download/details.aspx?id=48145
 
-#Compilation from source notes:
+# Compilation from source notes:
 
 Requires the following libraries to compile properly:
 
