@@ -8,14 +8,24 @@ This plugin allows you to have a native "now playing" widget inside of OBS. No n
 
 # How to use
 
-Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Add the new source inside, it is called SpotifyNowPlaying. Configure using the built in options.
+Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory. Launch OBS and add a new source, choose the new option called SpotifyNowPlaying. Configure the settings using the built in options.
 
 # Known limitations
 
 Only works on windows. 
 Only works for spotify. Might add youtube music later, but other services are unlikely since im not going to pay for them and I only have spotify and youtube.
 
-#Compilation from source notes:
+# Troubleshooting
+
+If the plugin is not working, you are probably missing .NET Framework 4.7.2 , which you can download from microsoft here: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472
+
+You only need the runtime, not the developer pack, but either will get you the components you need.
+
+You will also need VC 2015-2022 runtime, which you can also download from microsoft here: https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+You may also need the VC Redist 2015, which is again hosted by microsoft and can be found here: https://www.microsoft.com/en-ie/download/details.aspx?id=48145
+
+# Compilation from source notes:
 
 Requires the following libraries to compile properly:
 
