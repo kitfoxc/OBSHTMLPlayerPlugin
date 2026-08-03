@@ -1,6 +1,9 @@
 # Native OBS Plugin to Display Now Playing Widget
 
-<img width="1071" height="1998" alt="image" src="https://github.com/user-attachments/assets/1809def0-d924-4686-963e-f34f96e825da" />
+<img width="1071" height="1697" alt="image" src="https://github.com/user-attachments/assets/f6bc8a4d-f724-4de8-9b5d-60c3a437784a" />
+
+
+
 
 
 
