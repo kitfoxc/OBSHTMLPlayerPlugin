@@ -34,6 +34,7 @@ You may also need the VC Redist 2015, which is again hosted by microsoft and can
 Requires the following libraries to compile properly:
 
 https://github.com/lingeriegoat/SpotifyReader
+
 https://github.com/lingeriegoat/CppSpotifyReaderDLLBridge
 
 The spotify reader DLL is written in c# because I am more comfortable working with windows using c#
