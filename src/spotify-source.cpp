@@ -1,5 +1,5 @@
 /*
-OBS Spotify Plugin
+OBS Now Playing Plugin
 Copyright (C) 2026 lingeriegoat https://github.com/lingeriegoat
 
 This program is free software; you can redistribute it and/or modify
@@ -50,14 +50,14 @@ constexpr int POLL_INTERVAL_MS = 1000;
 constexpr int DEFAULT_CARD_W = 400;
 constexpr int DEFAULT_CARD_H = 110;
 constexpr int PAD = 12;
-constexpr int MIN_TEXT_W = 20;                             // never let the text column collapse to nothing
-constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2); // pause once the last letter is fully visible
+constexpr int MIN_TEXT_W = 20;                            
+constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2);
 constexpr int MIN_ART_SIZE = 10;
 
 // VU meter geometry
-constexpr int VU_MAX_BAR_COUNT = 32;   // upper bound for array sizing / property clamp
-constexpr int VU_BAR_GAP = 3;          // fixed spacing between bars (not exposed as a setting)
-constexpr int VU_GAP_BEFORE_TEXT = 10; // gap between the VU block and the text column
+constexpr int VU_MAX_BAR_COUNT = 32;   
+constexpr int VU_BAR_GAP = 3;          
+constexpr int VU_GAP_BEFORE_TEXT = 10; 
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -128,15 +128,6 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-// Draws `text` inside `bounds`. If it fits, draws it normally (static). If
-// it doesn't, scrolls it left by `scrollOffsetPx` (clamped to the range that
-// keeps it fully within `bounds` at the far end) -- the poll thread is
-// responsible for advancing scrollOffsetPx toward that max, then pausing at
-// the end before resetting back to 0, rather than looping continuously.
-// Reports back whether scrolling was needed, the measured average
-// per-character pixel width (used to advance by roughly one letter per
-// tick), and the max scroll offset (the poll thread needs this to know when
-// the last letter has come fully into view).
 void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds,
 			double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll, double *outAvgCharPx,
 			double *outMaxOffsetPx)
@@ -146,17 +137,7 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	if (text.empty())
 		return;
 
-	// GenericTypographic (vs. the plain default StringFormat) removes the
-	// small extra margin GDI+ normally reserves around text for line-wrap
-	// layout purposes -- without it, measured.Width (and therefore where
-	// we clamp the scroll-to-end position) runs a bit past the actual
-	// visible ink, which reads as leftover blank space after the last
-	// letter. This is Microsoft's own recommended format for this exact
-	// kind of tight, single-line scrolling text.
-	//
-	// StringFormat's copy constructor is private, so Clone() is the
-	// documented way to get a mutable instance seeded from the generic
-	// typographic format; fall back to a plain default if it ever fails.
+	
 	std::unique_ptr<StringFormat> sfClone(StringFormat::GenericTypographic()->Clone());
 	StringFormat defaultFallback;
 	StringFormat &sf = sfClone ? *sfClone : defaultFallback;
@@ -166,13 +147,11 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
 	*outAvgCharPx = std::max(1.0, (double)measured.Width / (double)text.length());
 
-	if (measured.Width <= bounds.Width) {
-		// Centering only makes sense when the text isn't scrolling -- once
-		// it needs to scroll, it's by definition wider than the box, so
-		// there's nothing to center.
+	if (measured.Width <= bounds.Width) 
+	{		
 		if (centerWhenStatic)
 			sf.SetAlignment(StringAlignmentCenter);
-		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net only, shouldn't normally trigger
+		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net 
 		g.DrawString(text.c_str(), -1, &font, bounds, &sf, &brush);
 		return;
 	}
@@ -188,7 +167,7 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 
 	RectF r = bounds;
 	r.X -= (REAL)offset;
-	r.Width = measured.Width + 4.0f; // wide enough for the full text; the clip does the real cropping
+	r.Width = measured.Width + 4.0f; // wide enough for the full text
 
 	g.DrawString(text.c_str(), -1, &font, r, &sf, &brush);
 
@@ -219,13 +198,13 @@ struct spotify_source {
 	int scroll_speed_ms = 300; // ms per letter for the marquee scroll
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
-	int vu_update_ms = 250; // how often the bars pick a new "dance" target
-	int vu_randomness = 50; // percent, 0-100: how much each bar jumps toward that target per tick
-	int vu_width = 37;      // total width of the VU block, px (default matches the original 5x5px+gaps layout)
-	int vu_height = 43;     // total height of the VU block, px (default matches the original artSize/2 rule)
+	int vu_update_ms = 250; 
+	int vu_randomness = 50; 
+	int vu_width = 37;      
+	int vu_height = 43;     
 	int vu_bar_count = 5;
-	bool vu_horizontal = false; // false = vertical bars (dance up/down), true = horizontal bars (dance left/right)
-	bool vertical_layout = false; // false = art left/text mid/VU right, true = art top/text mid/VU bottom
+	bool vu_horizontal = false; 
+	bool vertical_layout = false; 
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -241,7 +220,6 @@ struct spotify_source {
 	std::vector<uint8_t> last_image;
 	bool have_track = false;
 
-	// --- marquee scroll state (owned by the poll thread only, no mutex needed) ---
 	bool title_needs_scroll = false;
 	bool artist_needs_scroll = false;
 	double title_scroll_px = 0.0;
@@ -256,7 +234,6 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point artist_pause_start{};
 	std::chrono::steady_clock::time_point last_scroll_tick{};
 
-	// --- VU meter animation state (owned by the poll thread only) ---
 	double vu_bar_frac[VU_MAX_BAR_COUNT] = {0.0}; // 0..1, scaled to pixel height/length at draw time
 	bool is_playing = false;
 	bool vu_was_playing = false;
@@ -289,12 +266,6 @@ struct AppearanceSettings {
 	bool vertical_layout;
 };
 
-// Draws the VU meter within blockRect. Vertical bars (the original look)
-// are arranged left-to-right and dance in height; horizontal bars (rotated
-// 90 degrees) are arranged top-to-bottom and dance in length instead. Either
-// way, blockRect's width/height come directly from the vu_width/vu_height
-// settings, so the same bounding box works for both orientations -- only
-// which axis is "the dancing one" changes.
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
 {
 	if (!s.vu_meter_enabled || blockRect.Width <= 0 || blockRect.Height <= 0)
@@ -307,8 +278,6 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 	int totalGap = (barCount - 1) * VU_BAR_GAP;
 
 	if (!s.vu_horizontal) {
-		// Vertical bars: arranged across the block's width, each bar's
-		// height dances between the block's bottom edge and its top.
 		int barThickness = std::max(1, (blockRect.Width - totalGap) / barCount);
 		int baselineY = blockRect.Y + blockRect.Height;
 
@@ -326,9 +295,6 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 			g.FillPath(&vuBrush, &barPath);
 		}
 	} else {
-		// Horizontal bars (rotated 90 degrees): arranged down the block's
-		// height, each bar's length dances between the block's left edge
-		// and its right.
 		int barThickness = std::max(1, (blockRect.Height - totalGap) / barCount);
 
 		for (int i = 0; i < barCount; i++) {
@@ -365,7 +331,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
 	g.FillPath(&bgBrush, &bgPath);
 
-	// font metrics -- needed by both layouts before we can lay anything out
 	FontFamily requestedFam(Utf8ToWide(s.font_face).c_str());
 	const FontFamily *fam = &requestedFam;
 	if (requestedFam.GetLastStatus() != Ok)
@@ -387,9 +352,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	int artistLineH = artistSize + 8;
 	int blockH = titleLineH + artistLineH;
 
-	// Geometry produced by whichever layout branch runs below, then consumed
-	// by the shared drawing code that follows (art / text / VU meter don't
-	// care which layout produced their rects).
 	int artSize = 0;
 	Rect artRect;
 	RectF titleRect, artistRect;
@@ -406,9 +368,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		if (maxArtByWidth < MIN_ART_SIZE)
 			maxArtByWidth = MIN_ART_SIZE;
 
-		// VU height is now an independent setting rather than derived from
-		// the art size, so the art just gets whatever vertical space is
-		// left after the text block and (if enabled) the VU block.
 		int reservedNonArt =
 			PAD * 2 + GAP_ART_TEXT + blockH + (s.vu_meter_enabled ? (GAP_TEXT_VU + s.vu_height) : 0);
 		artSize = cardH - reservedNonArt;
@@ -630,9 +589,7 @@ static void poll_loop(spotify_source *ctx)
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
-		// Inner wait loop: drives the ~1s poll cadence above, but also
-		// drives the (much faster) marquee-scroll and VU-meter animation
-		// ticks in between polls, without hitting the bridge again.
+		
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
 			if (ctx->settings_dirty)
 				break; // let the outer loop apply the appearance change immediately
@@ -702,9 +659,7 @@ static void poll_loop(spotify_source *ctx)
 					int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
 					if (ctx->is_playing) {
 						std::uniform_real_distribution<double> dist(0.0, 1.0);
-						// randomness=100 jumps straight to a new random target each
-						// tick (the old, frantic behavior); lower values ease toward
-						// the target instead, so the bars drift rather than snap.
+						
 						double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
 						for (int i = 0; i < barCount; i++) {
 							double target = dist(ctx->vu_rng);
@@ -856,6 +811,7 @@ static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
 
+	obs_properties_add_bool(props, "vertical_layout", obs_module_text("Vertical Layout"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("Title Color"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("Artist Color"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
@@ -868,14 +824,14 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
 	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("Scroll Speed (ms per letter)"), 20, 5000, 10);
 	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("Show VU Meter"));
+	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VU Meter Horizontal Orientation"));	
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VU Meter Color"));
 	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VU Update Speed (ms)"), 50, 2000, 10);
 	obs_properties_add_int(props, "vu_randomness", obs_module_text("VU Randomness (%)"), 0, 100, 5);
 	obs_properties_add_int(props, "vu_width", obs_module_text("VU Meter Width (px)"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_height", obs_module_text("VU Meter Height (px)"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VU Bar Count"), 1, VU_MAX_BAR_COUNT, 1);
-	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VU Meter Horizontal Orientation"));
-	obs_properties_add_bool(props, "vertical_layout", obs_module_text("Vertical Layout"));
+	
 
 	return props;
 }
