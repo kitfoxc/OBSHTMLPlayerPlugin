@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs-module.h>
 #include <util/dstr.h>
+#include <util/bmem.h>
 
 #define NOMINMAX
 #include <windows.h>
@@ -50,14 +51,14 @@ constexpr int POLL_INTERVAL_MS = 1000;
 constexpr int DEFAULT_CARD_W = 400;
 constexpr int DEFAULT_CARD_H = 110;
 constexpr int PAD = 12;
-constexpr int MIN_TEXT_W = 20;                            
+constexpr int MIN_TEXT_W = 20;
 constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2);
 constexpr int MIN_ART_SIZE = 10;
 
 // VU meter geometry
-constexpr int VU_MAX_BAR_COUNT = 32;   
-constexpr int VU_BAR_GAP = 3;          
-constexpr int VU_GAP_BEFORE_TEXT = 10; 
+constexpr int VU_MAX_BAR_COUNT = 32;
+constexpr int VU_BAR_GAP = 3;
+constexpr int VU_GAP_BEFORE_TEXT = 10;
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -137,7 +138,6 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	if (text.empty())
 		return;
 
-	
 	std::unique_ptr<StringFormat> sfClone(StringFormat::GenericTypographic()->Clone());
 	StringFormat defaultFallback;
 	StringFormat &sf = sfClone ? *sfClone : defaultFallback;
@@ -147,11 +147,10 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
 	*outAvgCharPx = std::max(1.0, (double)measured.Width / (double)text.length());
 
-	if (measured.Width <= bounds.Width) 
-	{		
+	if (measured.Width <= bounds.Width) {
 		if (centerWhenStatic)
 			sf.SetAlignment(StringAlignmentCenter);
-		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net 
+		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net
 		g.DrawString(text.c_str(), -1, &font, bounds, &sf, &brush);
 		return;
 	}
@@ -198,13 +197,14 @@ struct spotify_source {
 	int scroll_speed_ms = 300; // ms per letter for the marquee scroll
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
-	int vu_update_ms = 250; 
-	int vu_randomness = 50; 
-	int vu_width = 37;      
-	int vu_height = 43;     
+	int vu_update_ms = 250;
+	int vu_randomness = 50;
+	int vu_width = 37;
+	int vu_height = 43;
 	int vu_bar_count = 5;
-	bool vu_horizontal = false; 
-	bool vertical_layout = false; 
+	bool vu_horizontal = false;
+	bool vertical_layout = false;
+	bool show_goat_placeholder = true;
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -239,6 +239,9 @@ struct spotify_source {
 	bool vu_was_playing = false;
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
+
+	std::unique_ptr<Image> goat_image;
+	bool goat_image_load_attempted = false;
 };
 
 struct AppearanceSettings {
@@ -264,6 +267,7 @@ struct AppearanceSettings {
 	int vu_bar_count;
 	bool vu_horizontal;
 	bool vertical_layout;
+	bool show_goat_placeholder;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -311,6 +315,28 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 			g.FillPath(&vuBrush, &barPath);
 		}
 	}
+}
+
+static Image *GetGoatImage(spotify_source *ctx)
+{
+	if (ctx->goat_image_load_attempted)
+		return ctx->goat_image.get();
+
+	ctx->goat_image_load_attempted = true;
+
+	char *path = obs_module_file("goat.png");
+	if (!path)
+		return nullptr;
+
+	std::wstring wpath = Utf8ToWide(path);
+	bfree(path);
+
+	auto img = std::make_unique<Image>(wpath.c_str());
+	if (img->GetLastStatus() != Ok)
+		return nullptr;
+
+	ctx->goat_image = std::move(img);
+	return ctx->goat_image.get();
 }
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist,
@@ -448,6 +474,13 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 			stream->Release();
 		}
 	}
+	if (!drewArt && s.show_goat_placeholder) {
+		Image *goat = GetGoatImage(ctx);
+		if (goat) {
+			g.DrawImage(goat, artRect);
+			drewArt = true;
+		}
+	}
 	if (!drewArt) {
 		SolidBrush placeholder(Color(255, 55, 55, 60));
 		g.FillRectangle(&placeholder, artRect);
@@ -498,14 +531,29 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color,     ctx->artist_color,     ctx->bg_color,
-				  ctx->bg_opacity,      ctx->font_face,        ctx->font_style,
-				  ctx->font_size,       ctx->font_flags,       ctx->artist_font_difference,
-				  ctx->card_w,          ctx->card_h,           ctx->text_offset_y,
-				  ctx->scroll_speed_ms, ctx->vu_meter_enabled, ctx->vu_color,
-				  ctx->vu_update_ms,    ctx->vu_randomness,    ctx->vu_width,
-				  ctx->vu_height,       ctx->vu_bar_count,     ctx->vu_horizontal,
-				  ctx->vertical_layout};
+	return AppearanceSettings{ctx->title_color,
+				  ctx->artist_color,
+				  ctx->bg_color,
+				  ctx->bg_opacity,
+				  ctx->font_face,
+				  ctx->font_style,
+				  ctx->font_size,
+				  ctx->font_flags,
+				  ctx->artist_font_difference,
+				  ctx->card_w,
+				  ctx->card_h,
+				  ctx->text_offset_y,
+				  ctx->scroll_speed_ms,
+				  ctx->vu_meter_enabled,
+				  ctx->vu_color,
+				  ctx->vu_update_ms,
+				  ctx->vu_randomness,
+				  ctx->vu_width,
+				  ctx->vu_height,
+				  ctx->vu_bar_count,
+				  ctx->vu_horizontal,
+				  ctx->vertical_layout,
+				  ctx->show_goat_placeholder};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -589,7 +637,6 @@ static void poll_loop(spotify_source *ctx)
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
-		
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
 			if (ctx->settings_dirty)
 				break; // let the outer loop apply the appearance change immediately
@@ -659,7 +706,7 @@ static void poll_loop(spotify_source *ctx)
 					int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
 					if (ctx->is_playing) {
 						std::uniform_real_distribution<double> dist(0.0, 1.0);
-						
+
 						double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
 						for (int i = 0; i < barCount; i++) {
 							double target = dist(ctx->vu_rng);
@@ -746,6 +793,8 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->vertical_layout = obs_data_get_bool(settings, "vertical_layout");
 
+	ctx->show_goat_placeholder = obs_data_get_bool(settings, "show_goat_placeholder");
+
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
 	if (font_obj) {
 		const char *face = obs_data_get_string(font_obj, "face");
@@ -799,6 +848,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "vertical_layout", false);
 
+	obs_data_set_default_bool(settings, "show_goat_placeholder", true);
+
 	obs_data_t *font_obj = obs_data_create();
 	obs_data_set_default_string(font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(font_obj, "style", "Bold");
@@ -824,14 +875,14 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
 	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("Scroll Speed (ms per letter)"), 20, 5000, 10);
 	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("Show VU Meter"));
-	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VU Meter Horizontal Orientation"));	
+	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VU Meter Horizontal Orientation"));
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VU Meter Color"));
 	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VU Update Speed (ms)"), 50, 2000, 10);
 	obs_properties_add_int(props, "vu_randomness", obs_module_text("VU Randomness (%)"), 0, 100, 5);
 	obs_properties_add_int(props, "vu_width", obs_module_text("VU Meter Width (px)"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_height", obs_module_text("VU Meter Height (px)"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VU Bar Count"), 1, VU_MAX_BAR_COUNT, 1);
-	
+	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("Show Goat When No Album Art"));
 
 	return props;
 }
