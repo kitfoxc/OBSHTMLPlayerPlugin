@@ -249,6 +249,10 @@ struct spotify_source {
 
 	std::unique_ptr<Image> goat_image;
 	bool goat_image_load_attempted = false;
+
+	std::unique_ptr<Bitmap> cached_bitmap;
+	int cached_bitmap_w = 0;
+	int cached_bitmap_h = 0;
 };
 
 struct AppearanceSettings {
@@ -329,7 +333,6 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 	}
 }
 
-
 static Image *GetGoatImage(spotify_source *ctx)
 {
 	if (ctx->goat_image_load_attempted)
@@ -358,9 +361,17 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	const int cardW = std::max(s.card_w, 50);
 	const int cardH = std::max(s.card_h, 30);
 
-	Bitmap card(cardW, cardH, PixelFormat32bppARGB);
+	if (!ctx->cached_bitmap || ctx->cached_bitmap_w != cardW || ctx->cached_bitmap_h != cardH) 
+	{
+		ctx->cached_bitmap = std::make_unique<Bitmap>(cardW, cardH, PixelFormat32bppARGB);
+		ctx->cached_bitmap_w = cardW;
+		ctx->cached_bitmap_h = cardH;
+	}
+	Bitmap &card = *ctx->cached_bitmap;
 	Graphics g(&card);
-	g.SetSmoothingMode(SmoothingModeAntiAlias);
+
+	g.SetSmoothingMode(SmoothingModeHighQuality);
+	g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 	g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 	g.Clear(Color(0, 0, 0, 0));
 
@@ -378,18 +389,18 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		famTitle = FontFamily::GenericSansSerif();
 	}
 	FontStyle styleTitle = ParseFontStyle(s.title_font_style, s.title_font_flags);
-	
+
 	//artist font
 	FontFamily requestedFamArtist(Utf8ToWide(s.artist_font_face).c_str());
 	const FontFamily *famArtist = &requestedFamArtist;
 	if (requestedFamArtist.GetLastStatus() != Ok) {
 		famArtist = FontFamily::GenericSansSerif();
 	}
-	FontStyle styleArtist = ParseFontStyle(s.artist_font_style, s.artist_font_flags);	
-	
+	FontStyle styleArtist = ParseFontStyle(s.artist_font_style, s.artist_font_flags);
+
 	int titleSize = s.title_font_size > 0 ? s.title_font_size : 16;
-	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : 14;	
-	
+	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : 14;
+
 	Font titleFont(famTitle, (REAL)titleSize, styleTitle, UnitPixel);
 
 	Font artistFont(famArtist, (REAL)artistSize, styleArtist, UnitPixel);
@@ -643,8 +654,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_artist = artist;
 				ctx->have_track = true;
 
-				// New track -- restart the marquee from the beginning.
-				ctx->title_scroll_px = 0.0;
+				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
 				ctx->artist_scroll_px = 0.0;
 				ctx->title_scroll_paused_at_end = false;
 				ctx->artist_scroll_paused_at_end = false;
@@ -709,16 +719,14 @@ static void poll_loop(spotify_source *ctx)
 				break; // let the outer loop apply the appearance change immediately
 
 			AppearanceSettings s{};
-			s = snapshot_settings(ctx);			
+			s = snapshot_settings(ctx);
 
 			if (ctx->have_track || s.show_plugin_attribution) {
 				auto now = std::chrono::steady_clock::now();
 				bool needCompose = false;
 
 				if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
-					
-					if (now - ctx->last_scroll_tick >=
-					    std::chrono::milliseconds(s.scroll_speed_ms)) {
+					if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
 						ctx->last_scroll_tick = now;
 
 						if (ctx->title_needs_scroll) {
@@ -738,7 +746,7 @@ static void poll_loop(spotify_source *ctx)
 								}
 							} else {
 								ctx->title_scroll_px += ctx->title_avg_char_px;
-								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) 
+								if (ctx->title_scroll_px >= ctx->title_scroll_max_px)
 								{
 									ctx->title_scroll_px = ctx->title_scroll_max_px;
 									ctx->title_scroll_paused_at_end = true;
@@ -750,10 +758,9 @@ static void poll_loop(spotify_source *ctx)
 
 						if (ctx->artist_needs_scroll) {
 							if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
-								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE)
+								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) 
 								{
 									if (ctx->artist_scroll_paused_at_end) {
-
 										ctx->artist_scroll_px = 0.0;
 										ctx->artist_scroll_paused_at_end = false;
 										ctx->artist_scroll_paused_at_start = true;
@@ -768,8 +775,7 @@ static void poll_loop(spotify_source *ctx)
 								ctx->artist_scroll_px += ctx->artist_avg_char_px;
 								if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) 
 								{
-									ctx->artist_scroll_px =
-										ctx->artist_scroll_max_px;
+									ctx->artist_scroll_px = ctx->artist_scroll_max_px;
 									ctx->artist_scroll_paused_at_end = true;
 									ctx->artist_pause_start = now;
 								}
@@ -778,7 +784,7 @@ static void poll_loop(spotify_source *ctx)
 						}
 					}
 				}
-				
+
 				if (s.vu_meter_enabled &&
 				    now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
 					ctx->last_vu_tick = now;
@@ -953,7 +959,6 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(artist_font_obj, "size", 16);
 	obs_data_set_default_obj(settings, "artist_font", artist_font_obj);
 	obs_data_release(artist_font_obj);
-
 }
 
 static obs_properties_t *spotify_source_properties(void *)
@@ -982,7 +987,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
 	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
-	
+
 	return props;
 }
 
