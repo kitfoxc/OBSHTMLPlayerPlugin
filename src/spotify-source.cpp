@@ -670,17 +670,15 @@ static void poll_loop(spotify_source *ctx)
 			if (ctx->settings_dirty)
 				break; // let the outer loop apply the appearance change immediately
 
-			if (ctx->have_track) {
+			AppearanceSettings s{};
+			s = snapshot_settings(ctx);			
+
+			if (ctx->have_track || s.show_plugin_attribution) {
 				auto now = std::chrono::steady_clock::now();
 				bool needCompose = false;
-				AppearanceSettings s{};
-				bool haveSnapshot = false;
 
 				if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
-					if (!haveSnapshot) {
-						s = snapshot_settings(ctx);
-						haveSnapshot = true;
-					}
+					
 					if (now - ctx->last_scroll_tick >=
 					    std::chrono::milliseconds(s.scroll_speed_ms)) {
 						ctx->last_scroll_tick = now;
@@ -724,11 +722,7 @@ static void poll_loop(spotify_source *ctx)
 						}
 					}
 				}
-
-				if (!haveSnapshot) {
-					s = snapshot_settings(ctx);
-					haveSnapshot = true;
-				}
+				
 				if (s.vu_meter_enabled &&
 				    now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
 					ctx->last_vu_tick = now;
