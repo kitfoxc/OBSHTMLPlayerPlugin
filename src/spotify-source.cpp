@@ -186,11 +186,14 @@ struct spotify_source {
 	long long artist_color = 0xFFFFFFFF;
 	long long bg_color = 0;
 	int bg_opacity = 92; // percent, 0-100
-	std::string font_face = "Segoe UI";
-	std::string font_style = "Regular";
-	int font_size = 16;
-	int font_flags = 0;
-	int artist_font_difference = -2;
+	std::string title_font_face = "Segoe UI";
+	std::string title_font_style = "Regular";
+	int title_font_size = 16;
+	int title_font_flags = 0;
+	std::string artist_font_face = "Segoe UI";
+	std::string artist_font_style = "Regular";
+	int artist_font_size = 14;
+	int artist_font_flags = 0;
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
 	int text_offset_y = 0;
@@ -251,11 +254,14 @@ struct AppearanceSettings {
 	long long artist_color;
 	long long bg_color;
 	int bg_opacity;
-	std::string font_face;
-	std::string font_style;
-	int font_size;
-	int font_flags;
-	int artist_font_difference;
+	std::string title_font_face;
+	std::string title_font_style;
+	int title_font_size;
+	int title_font_flags;
+	std::string artist_font_face;
+	std::string artist_font_style;
+	int artist_font_size;
+	int artist_font_flags;
 	int card_w;
 	int card_h;
 	int text_offset_y;
@@ -362,17 +368,29 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
 	g.FillPath(&bgBrush, &bgPath);
 
-	FontFamily requestedFam(Utf8ToWide(s.font_face).c_str());
-	const FontFamily *fam = &requestedFam;
-	if (requestedFam.GetLastStatus() != Ok)
-		fam = FontFamily::GenericSansSerif();
+	//title font
+	FontFamily requestedFamTitle(Utf8ToWide(s.title_font_face).c_str());
+	const FontFamily *famTitle = &requestedFamTitle;
+	if (requestedFamTitle.GetLastStatus() != Ok) 
+	{
+		famTitle = FontFamily::GenericSansSerif();
+	}
+	FontStyle styleTitle = ParseFontStyle(s.title_font_style, s.title_font_flags);
+	
+	//artist font
+	FontFamily requestedFamArtist(Utf8ToWide(s.artist_font_face).c_str());
+	const FontFamily *famArtist = &requestedFamArtist;
+	if (requestedFamArtist.GetLastStatus() != Ok) {
+		famArtist = FontFamily::GenericSansSerif();
+	}
+	FontStyle styleArtist = ParseFontStyle(s.artist_font_style, s.artist_font_flags);	
+	
+	int titleSize = s.title_font_size > 0 ? s.title_font_size : 16;
+	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : 14;	
+	
+	Font titleFont(famTitle, (REAL)titleSize, styleTitle, UnitPixel);
 
-	FontStyle style = ParseFontStyle(s.font_style, s.font_flags);
-	int titleSize = s.font_size > 0 ? s.font_size : 16;
-	int artistSize = titleSize > 12 ? titleSize + s.artist_font_difference : titleSize;
-
-	Font titleFont(fam, (REAL)titleSize, style, UnitPixel);
-	Font artistFont(fam, (REAL)artistSize, FontStyleRegular, UnitPixel);
+	Font artistFont(famArtist, (REAL)artistSize, styleArtist, UnitPixel);
 
 	Color titleColor = ObsColorToGdip(s.title_color);
 	Color artistColor = ObsColorToGdip(s.artist_color);
@@ -562,11 +580,14 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->artist_color,
 				  ctx->bg_color,
 				  ctx->bg_opacity,
-				  ctx->font_face,
-				  ctx->font_style,
-				  ctx->font_size,
-				  ctx->font_flags,
-				  ctx->artist_font_difference,
+				  ctx->title_font_face,
+				  ctx->title_font_style,
+				  ctx->title_font_size,
+				  ctx->title_font_flags,
+				  ctx->artist_font_face,
+				  ctx->artist_font_style,
+				  ctx->artist_font_size,
+				  ctx->artist_font_flags,
 				  ctx->card_w,
 				  ctx->card_h,
 				  ctx->text_offset_y,
@@ -788,9 +809,6 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->text_offset_y = (int)obs_data_get_int(settings, "text_offset_y");
 	ctx->text_offset_y = std::clamp(ctx->text_offset_y, -1000, 1000);
 
-	ctx->artist_font_difference = (int)obs_data_get_int(settings, "artist_font_difference");
-	ctx->artist_font_difference = std::clamp(ctx->artist_font_difference, -50, 50);
-
 	ctx->scroll_speed_ms = (int)obs_data_get_int(settings, "scroll_speed_ms");
 	ctx->scroll_speed_ms = std::clamp(ctx->scroll_speed_ms, 20, 5000);
 
@@ -813,27 +831,38 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->vu_bar_count = std::clamp(ctx->vu_bar_count, 1, VU_MAX_BAR_COUNT);
 
 	ctx->vu_horizontal = obs_data_get_bool(settings, "vu_horizontal");
-
 	ctx->vertical_layout = obs_data_get_bool(settings, "vertical_layout");
-
 	ctx->show_goat_placeholder = obs_data_get_bool(settings, "show_goat_placeholder");
-
 	ctx->show_plugin_attribution = obs_data_get_bool(settings, "show_plugin_attribution");
-
 	ctx->hide_album_art = obs_data_get_bool(settings, "hide_album_art");
 
-	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
-	if (font_obj) {
-		const char *face = obs_data_get_string(font_obj, "face");
-		const char *style = obs_data_get_string(font_obj, "style");
-		ctx->font_face = (face && face[0]) ? face : "Segoe UI";
-		ctx->font_style = style ? style : "Regular";
-		ctx->font_size = (int)obs_data_get_int(font_obj, "size");
-		ctx->font_flags = (int)obs_data_get_int(font_obj, "flags");
-		obs_data_release(font_obj);
+	obs_data_t *title_font_obj = obs_data_get_obj(settings, "title_font");
+	if (title_font_obj) {
+		const char *face = obs_data_get_string(title_font_obj, "face");
+		const char *style = obs_data_get_string(title_font_obj, "style");
+		ctx->title_font_face = (face && face[0]) ? face : "Segoe UI";
+		ctx->title_font_style = style ? style : "Regular";
+		ctx->title_font_size = (int)obs_data_get_int(title_font_obj, "size");
+		ctx->title_font_flags = (int)obs_data_get_int(title_font_obj, "flags");
+		obs_data_release(title_font_obj);
 	}
-	if (ctx->font_size <= 0)
-		ctx->font_size = 16;
+	if (ctx->title_font_size <= 0) {
+		ctx->title_font_size = 16;
+	}
+
+	obs_data_t *artist_font_obj = obs_data_get_obj(settings, "artist_font");
+	if (artist_font_obj) {
+		const char *face = obs_data_get_string(artist_font_obj, "face");
+		const char *style = obs_data_get_string(artist_font_obj, "style");
+		ctx->artist_font_face = (face && face[0]) ? face : "Segoe UI";
+		ctx->artist_font_style = style ? style : "Regular";
+		ctx->artist_font_size = (int)obs_data_get_int(artist_font_obj, "size");
+		ctx->artist_font_flags = (int)obs_data_get_int(artist_font_obj, "flags");
+		obs_data_release(artist_font_obj);
+	}
+	if (ctx->artist_font_size <= 0) {
+		ctx->artist_font_size = 14;
+	}
 
 	ctx->settings_dirty = true;
 }
@@ -856,8 +885,6 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "card_height", DEFAULT_CARD_H);
 	obs_data_set_default_int(settings, "text_offset_y", 0);
 
-	obs_data_set_default_int(settings, "artist_font_difference", -2);
-
 	obs_data_set_default_int(settings, "scroll_speed_ms", 300);
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
@@ -874,19 +901,24 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "vu_horizontal", false);
 
 	obs_data_set_default_bool(settings, "vertical_layout", false);
-
 	obs_data_set_default_bool(settings, "show_goat_placeholder", true);
-
 	obs_data_set_default_bool(settings, "show_plugin_attribution", true);
-
 	obs_data_set_default_bool(settings, "hide_album_art", false);
 
-	obs_data_t *font_obj = obs_data_create();
-	obs_data_set_default_string(font_obj, "face", "Segoe UI");
-	obs_data_set_default_string(font_obj, "style", "Bold");
-	obs_data_set_default_int(font_obj, "size", 16);
-	obs_data_set_default_obj(settings, "font", font_obj);
-	obs_data_release(font_obj);
+	obs_data_t *title_font_obj = obs_data_create();
+	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
+	obs_data_set_default_string(title_font_obj, "style", "Bold");
+	obs_data_set_default_int(title_font_obj, "size", 16);
+	obs_data_set_default_obj(settings, "title_font", title_font_obj);
+	obs_data_release(title_font_obj);
+
+	obs_data_t *artist_font_obj = obs_data_create();
+	obs_data_set_default_string(artist_font_obj, "face", "Segoe UI");
+	obs_data_set_default_string(artist_font_obj, "style", "Regular");
+	obs_data_set_default_int(artist_font_obj, "size", 16);
+	obs_data_set_default_obj(settings, "artist_font", artist_font_obj);
+	obs_data_release(artist_font_obj);
+
 }
 
 static obs_properties_t *spotify_source_properties(void *)
@@ -899,9 +931,8 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("Artist Color"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("Background Opacity"), 0, 100, 1);
-	obs_properties_add_font(props, "font", obs_module_text("Font"));
-	obs_properties_add_int(props, "artist_font_difference", obs_module_text("Artist Font Size Difference"), -50, 50,
-			       1);
+	obs_properties_add_font(props, "title_font", obs_module_text("Title Font"));
+	obs_properties_add_font(props, "artist_font", obs_module_text("Artist Font"));
 	obs_properties_add_int(props, "card_width", obs_module_text("Card Width"), 50, 4000, 10);
 	obs_properties_add_int(props, "card_height", obs_module_text("Card Height"), 30, 2000, 10);
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
