@@ -369,7 +369,6 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	}
 	Bitmap &card = *ctx->cached_bitmap;
 	Graphics g(&card);
-
 	g.SetSmoothingMode(SmoothingModeHighQuality);
 	g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 	g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
