@@ -29,6 +29,11 @@ If the preview or the live source looks like this:
 
 <img width="1044" height="280" alt="image" src="https://github.com/user-attachments/assets/87d287a3-5623-4082-89d4-2fa2e439608a" />
 
+or like this:
+
+<img width="1041" height="248" alt="image" src="https://github.com/user-attachments/assets/65fccbd2-6f99-4340-82e8-cb5a73c62436" />
+
+
 You either do not have any compatible source running and playing a song, or you are not using windows 10 or 11, or you are using an incompatible source. If its the latter case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
 
 If the plugin doesnt load at all, you are probably missing .NET Framework 4.7.2 , which you can download from microsoft here: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472
