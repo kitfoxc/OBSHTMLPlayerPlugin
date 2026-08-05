@@ -14,10 +14,16 @@ Works for Spotify, YoutubeMusic desktop clients, and Apple Music. More services 
 
 # How to use
 
+### Release 1.8 and up
+
 Download the latest release from the releases page. Unzip into the root of your OBS directory (usually something like `C:\Program Files\obs-studio\`). Launch OBS and add a new source, choose the new option called Now Playing Widget. Configure the settings using the built in options.
 
 <img width="1037" height="414" alt="obsplugininstallinstructions" src="https://github.com/user-attachments/assets/2b5765cf-1afe-4489-970a-1a52e7b46357" />
 
+
+### Release 1.7 and prior
+
+If you want to use a release before 1.8, the distribution method was slightly different. All pre-1.8 releases contain a zip with only 4 files inside of it. Unzip these files directly into your plugins folder, usually something like `C:\Program Files\obs-studio\obs-plugins\64bit`
 
 # Known limitations
 
