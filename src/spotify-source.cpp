@@ -205,6 +205,8 @@ struct spotify_source {
 	bool vu_horizontal = false;
 	bool vertical_layout = false;
 	bool show_goat_placeholder = true;
+	bool show_plugin_attribution = true;
+	bool hide_album_art = false;
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -268,6 +270,8 @@ struct AppearanceSettings {
 	bool vu_horizontal;
 	bool vertical_layout;
 	bool show_goat_placeholder;
+	bool show_plugin_attribution;
+	bool hide_album_art;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -316,6 +320,7 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 		}
 	}
 }
+
 
 static Image *GetGoatImage(spotify_source *ctx)
 {
@@ -384,33 +389,41 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	bool centerText = false;
 	Rect vuBlockRect(0, 0, 0, 0);
 
+	bool showArt = !s.hide_album_art;
+
 	if (s.vertical_layout) {
-		// Vertical layout: album art on top, text in the middle, VU meter
-		// along the bottom.
 		constexpr int GAP_ART_TEXT = 14;
 		constexpr int GAP_TEXT_VU = VU_GAP_BEFORE_TEXT;
-
-		int maxArtByWidth = cardW - PAD * 2;
-		if (maxArtByWidth < MIN_ART_SIZE)
-			maxArtByWidth = MIN_ART_SIZE;
-
-		int reservedNonArt =
-			PAD * 2 + GAP_ART_TEXT + blockH + (s.vu_meter_enabled ? (GAP_TEXT_VU + s.vu_height) : 0);
-		artSize = cardH - reservedNonArt;
-		if (artSize > maxArtByWidth)
-			artSize = maxArtByWidth;
-		if (artSize < MIN_ART_SIZE)
-			artSize = MIN_ART_SIZE;
-
-		int artX = (cardW - artSize) / 2;
-		int artY = PAD;
-		artRect = Rect(artX, artY, artSize, artSize);
 
 		int textW = cardW - PAD * 2;
 		if (textW < MIN_TEXT_W)
 			textW = MIN_TEXT_W;
 		int textX = PAD;
-		int textTop = artY + artSize + GAP_ART_TEXT + s.text_offset_y;
+		int textTop;
+
+		if (showArt) {
+			int maxArtByWidth = cardW - PAD * 2;
+			if (maxArtByWidth < MIN_ART_SIZE)
+				maxArtByWidth = MIN_ART_SIZE;
+
+			int reservedNonArt = PAD * 2 + GAP_ART_TEXT + blockH +
+					     (s.vu_meter_enabled ? (GAP_TEXT_VU + s.vu_height) : 0);
+			artSize = cardH - reservedNonArt;
+			if (artSize > maxArtByWidth)
+				artSize = maxArtByWidth;
+			if (artSize < MIN_ART_SIZE)
+				artSize = MIN_ART_SIZE;
+
+			int artX = (cardW - artSize) / 2;
+			int artY = PAD;
+			artRect = Rect(artX, artY, artSize, artSize);
+
+			textTop = artY + artSize + GAP_ART_TEXT + s.text_offset_y;
+		} else {
+			artSize = 0;
+			artRect = Rect(0, 0, 0, 0);
+			textTop = PAD + s.text_offset_y;
+		}
 
 		titleRect = RectF((REAL)textX, (REAL)textTop, (REAL)textW, (REAL)titleLineH);
 		artistRect = RectF((REAL)textX, (REAL)(textTop + titleLineH), (REAL)textW, (REAL)artistLineH);
@@ -423,18 +436,24 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 		centerText = true;
 	} else {
-		// Horizontal layout (the original): art left, text middle, VU meter
-		// far right.
-		artSize = cardH - PAD * 2;
-		if (artSize < MIN_ART_SIZE)
-			artSize = MIN_ART_SIZE;
-		int maxArtForWidth = cardW - PAD * 2 - MIN_TEXT_W;
-		if (artSize > maxArtForWidth)
-			artSize = std::max(MIN_ART_SIZE, maxArtForWidth);
+		int textX;
 
-		artRect = Rect(PAD, PAD, artSize, artSize);
+		if (showArt) {
+			artSize = cardH - PAD * 2;
+			if (artSize < MIN_ART_SIZE)
+				artSize = MIN_ART_SIZE;
+			int maxArtForWidth = cardW - PAD * 2 - MIN_TEXT_W;
+			if (artSize > maxArtForWidth)
+				artSize = std::max(MIN_ART_SIZE, maxArtForWidth);
 
-		int textX = PAD + artSize + 14;
+			artRect = Rect(PAD, PAD, artSize, artSize);
+			textX = PAD + artSize + 14;
+		} else {
+			artSize = 0;
+			artRect = Rect(0, 0, 0, 0);
+			textX = PAD;
+		}
+
 		int vuBlockWidthReserved = s.vu_meter_enabled ? (s.vu_width + VU_GAP_BEFORE_TEXT) : 0;
 		int textW = cardW - textX - PAD - vuBlockWidthReserved;
 		if (textW < MIN_TEXT_W)
@@ -454,42 +473,50 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		centerText = false;
 	}
 
-	// album art (shared drawing code -- geometry came from whichever branch ran above)
-	GraphicsPath artClip;
-	AddRoundedRect(artClip, artRect, 8);
+	if (showArt) {
+		GraphicsPath artClip;
+		AddRoundedRect(artClip, artRect, 8);
 
-	Region savedClip;
-	g.GetClip(&savedClip);
-	g.SetClip(&artClip);
+		Region savedClip;
+		g.GetClip(&savedClip);
+		g.SetClip(&artClip);
 
-	bool drewArt = false;
-	if (image_data != nullptr && image_len > 0) {
-		IStream *stream = SHCreateMemStream(image_data, (UINT)image_len);
-		if (stream) {
-			Image img(stream);
-			if (img.GetLastStatus() == Ok) {
-				g.DrawImage(&img, artRect);
+		bool drewArt = false;
+		if (image_data != nullptr && image_len > 0) {
+			IStream *stream = SHCreateMemStream(image_data, (UINT)image_len);
+			if (stream) {
+				Image img(stream);
+				if (img.GetLastStatus() == Ok) {
+					g.DrawImage(&img, artRect);
+					drewArt = true;
+				}
+				stream->Release();
+			}
+		}
+		if (!drewArt && s.show_goat_placeholder) {
+			Image *goat = GetGoatImage(ctx);
+			if (goat) {
+				g.DrawImage(goat, artRect);
 				drewArt = true;
 			}
-			stream->Release();
 		}
-	}
-	if (!drewArt && s.show_goat_placeholder) {
-		Image *goat = GetGoatImage(ctx);
-		if (goat) {
-			g.DrawImage(goat, artRect);
-			drewArt = true;
+		if (!drewArt) {
+			SolidBrush placeholder(Color(255, 55, 55, 60));
+			g.FillRectangle(&placeholder, artRect);
 		}
+		g.SetClip(&savedClip);
 	}
-	if (!drewArt) {
-		SolidBrush placeholder(Color(255, 55, 55, 60));
-		g.FillRectangle(&placeholder, artRect);
-	}
-	g.SetClip(&savedClip);
 
 	// text (shared drawing code)
-	std::wstring wtitle = Utf8ToWide(title);
-	std::wstring wartist = Utf8ToWide(artist);
+	std::string displayTitle = title;
+	std::string displayArtist = artist;
+	if (!ctx->have_track && s.show_plugin_attribution) {
+		displayTitle = "NowPlayingWidget by lingeriegoat";
+		displayArtist = "Play some music to get started";
+	}
+
+	std::wstring wtitle = Utf8ToWide(displayTitle);
+	std::wstring wartist = Utf8ToWide(displayArtist);
 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
@@ -553,7 +580,9 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->vu_bar_count,
 				  ctx->vu_horizontal,
 				  ctx->vertical_layout,
-				  ctx->show_goat_placeholder};
+				  ctx->show_goat_placeholder,
+				  ctx->show_plugin_attribution,
+				  ctx->hide_album_art};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -795,6 +824,10 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->show_goat_placeholder = obs_data_get_bool(settings, "show_goat_placeholder");
 
+	ctx->show_plugin_attribution = obs_data_get_bool(settings, "show_plugin_attribution");
+
+	ctx->hide_album_art = obs_data_get_bool(settings, "hide_album_art");
+
 	obs_data_t *font_obj = obs_data_get_obj(settings, "font");
 	if (font_obj) {
 		const char *face = obs_data_get_string(font_obj, "face");
@@ -850,6 +883,10 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "show_goat_placeholder", true);
 
+	obs_data_set_default_bool(settings, "show_plugin_attribution", true);
+
+	obs_data_set_default_bool(settings, "hide_album_art", false);
+
 	obs_data_t *font_obj = obs_data_create();
 	obs_data_set_default_string(font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(font_obj, "style", "Bold");
@@ -863,6 +900,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("Vertical Layout"));
+	obs_properties_add_bool(props, "hide_album_art", obs_module_text("Hide Album Art"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("Title Color"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("Artist Color"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
@@ -883,7 +921,8 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "vu_height", obs_module_text("VU Meter Height (px)"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VU Bar Count"), 1, VU_MAX_BAR_COUNT, 1);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("Show Goat When No Album Art"));
-
+	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("Show Plugin Attribution"));
+	
 	return props;
 }
 
