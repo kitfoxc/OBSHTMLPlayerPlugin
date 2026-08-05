@@ -360,7 +360,9 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	Bitmap card(cardW, cardH, PixelFormat32bppARGB);
 	Graphics g(&card);
-	g.SetSmoothingMode(SmoothingModeAntiAlias);
+
+	g.SetSmoothingMode(SmoothingModeHighQuality);	
+	g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 	g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 	g.Clear(Color(0, 0, 0, 0));
 
@@ -621,6 +623,7 @@ static void poll_loop(spotify_source *ctx)
 	while (ctx->running) {
 		NativeMediaInfo info{};
 		bool has = GetCurrentTrackNative(&info);
+		auto now = std::chrono::steady_clock::now();
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
@@ -629,8 +632,7 @@ static void poll_loop(spotify_source *ctx)
 
 		if (has) {
 			gap_active = false;
-			ctx->is_playing = info.IsPlaying;
-			auto now = std::chrono::steady_clock::now();
+			ctx->is_playing = info.IsPlaying;			
 
 			if (track_changed) {
 				if (info.ImageData != nullptr && info.ImageLength > 0) {
@@ -641,10 +643,8 @@ static void poll_loop(spotify_source *ctx)
 
 				ctx->last_song = title;
 				ctx->last_artist = artist;
-				ctx->have_track = true;
-
-				// New track -- restart the marquee from the beginning.
-				ctx->title_scroll_px = 0.0;
+				ctx->have_track = true;				
+				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
 				ctx->artist_scroll_px = 0.0;
 				ctx->title_scroll_paused_at_end = false;
 				ctx->artist_scroll_paused_at_end = false;
@@ -652,7 +652,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_scroll_paused_at_start = true;
 				ctx->title_pause_start = now;
 				ctx->artist_pause_start = now;
-				ctx->last_scroll_tick = std::chrono::steady_clock::now();
+				ctx->last_scroll_tick = now;
 
 				compose_bitmap(ctx, title, artist,
 					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
@@ -672,13 +672,12 @@ static void poll_loop(spotify_source *ctx)
 			}
 		} else if (ctx->have_track) {
 			ctx->is_playing = false;
-
 			if (!gap_active) {
 				gap_active = true;
-				gap_start = std::chrono::steady_clock::now();
+				gap_start = now;
 			}
 
-			if (std::chrono::steady_clock::now() - gap_start >= MISSING_SESSION_GRACE) {
+			if (now - gap_start >= MISSING_SESSION_GRACE) {
 				ctx->last_song.clear();
 				ctx->last_artist.clear();
 				ctx->last_image.clear();
@@ -690,8 +689,8 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_scroll_paused_at_end = false;
 				ctx->title_scroll_paused_at_start = true;
 				ctx->artist_scroll_paused_at_start = true;
-				ctx->title_pause_start = std::chrono::steady_clock::now();
-				ctx->artist_pause_start = std::chrono::steady_clock::now();
+				ctx->title_pause_start = now;
+				ctx->artist_pause_start = now;
 				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
@@ -712,7 +711,6 @@ static void poll_loop(spotify_source *ctx)
 			s = snapshot_settings(ctx);			
 
 			if (ctx->have_track || s.show_plugin_attribution) {
-				auto now = std::chrono::steady_clock::now();
 				bool needCompose = false;
 
 				if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
