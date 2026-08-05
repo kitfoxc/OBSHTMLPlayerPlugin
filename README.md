@@ -25,6 +25,8 @@ Only works on windows.
 
 # Troubleshooting
 
+### The widget is blank, or its only show the name of the widget and this weird picture of a goat!
+
 If the preview or the live source looks like this:
 
 <img width="1044" height="280" alt="image" src="https://github.com/user-attachments/assets/87d287a3-5623-4082-89d4-2fa2e439608a" />
@@ -33,8 +35,13 @@ or like this:
 
 <img width="1041" height="248" alt="image" src="https://github.com/user-attachments/assets/65fccbd2-6f99-4340-82e8-cb5a73c62436" />
 
+You either do not have any songs playing, or you are not using windows 10 or 11, or you are using an incompatible source. If its the latter case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
 
-You either do not have any compatible source running and playing a song, or you are not using windows 10 or 11, or you are using an incompatible source. If its the latter case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
+### The Artist text is very small
+
+If you had an older version of the plugin, the font has probably defaulted now that it can be changed separately. Simply open the options and select a new font. The old default was -2px smaller than whatever the Title font is, and "Regular" weight (ie, not bold or italic).
+
+### The plugin is not loading at all!
 
 If the plugin doesnt load at all, you are probably missing .NET Framework 4.7.2 , which you can download from microsoft here: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472
 
@@ -43,6 +50,10 @@ You only need the runtime, not the developer pack, but either will get you the c
 You will also need VC 2015-2022 runtime, which you can also download from microsoft here: https://aka.ms/vs/17/release/vc_redist.x64.exe
 
 You may also need the VC Redist 2015, which is again hosted by microsoft and can be found here: https://www.microsoft.com/en-ie/download/details.aspx?id=48145
+
+### None of this helps me!
+
+Please create an issue here on github or a post on the OBS forums thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing the problem with as much detail as possible, I will try to help you.
 
 # Compilation from source notes:
 
