@@ -960,28 +960,28 @@ static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_bool(props, "vertical_layout", obs_module_text("Vertical Layout"));
-	obs_properties_add_bool(props, "hide_album_art", obs_module_text("Hide Album Art"));
-	obs_properties_add_color_alpha(props, "title_color", obs_module_text("Title Color"));
-	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("Artist Color"));
-	obs_properties_add_color(props, "bg_color", obs_module_text("Background Color"));
-	obs_properties_add_int(props, "bg_opacity", obs_module_text("Background Opacity"), 0, 100, 1);
-	obs_properties_add_font(props, "title_font", obs_module_text("Title Font"));
-	obs_properties_add_font(props, "artist_font", obs_module_text("Artist Font"));
-	obs_properties_add_int(props, "card_width", obs_module_text("Card Width"), 50, 4000, 10);
-	obs_properties_add_int(props, "card_height", obs_module_text("Card Height"), 30, 2000, 10);
-	obs_properties_add_int(props, "text_offset_y", obs_module_text("Text Vertical Offset"), -1000, 1000, 1);
-	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("Scroll Speed (ms per letter)"), 20, 5000, 10);
-	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("Show VU Meter"));
-	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VU Meter Horizontal Orientation"));
-	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VU Meter Color"));
-	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VU Update Speed (ms)"), 50, 2000, 10);
-	obs_properties_add_int(props, "vu_randomness", obs_module_text("VU Randomness (%)"), 0, 100, 5);
-	obs_properties_add_int(props, "vu_width", obs_module_text("VU Meter Width (px)"), 4, 2000, 1);
-	obs_properties_add_int(props, "vu_height", obs_module_text("VU Meter Height (px)"), 4, 2000, 1);
-	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VU Bar Count"), 1, VU_MAX_BAR_COUNT, 1);
-	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("Show Goat When No Album Art"));
-	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("Show Plugin Attribution"));
+	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
+	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
+	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
+	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
+	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
+	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
+	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
+	obs_properties_add_font(props, "artist_font", obs_module_text("ArtistFont"));
+	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
+	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
+	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 20, 5000, 10);
+	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("ShowVUMeter"));
+	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VUMeterHorizontalOrientation"));
+	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VUMeterColor"));
+	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VUUpdateSpeed"), 50, 2000, 10);
+	obs_properties_add_int(props, "vu_randomness", obs_module_text("VURandomness"), 0, 100, 5);
+	obs_properties_add_int(props, "vu_width", obs_module_text("VUMeterWidth"), 4, 2000, 1);
+	obs_properties_add_int(props, "vu_height", obs_module_text("VUMeterHeight"), 4, 2000, 1);
+	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
+	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
+	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
 	
 	return props;
 }

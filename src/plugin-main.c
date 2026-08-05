@@ -21,7 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "spotify-source.h"
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_USE_DEFAULT_LOCALE("obs-spotify-overlay", "en-US")
+OBS_MODULE_USE_DEFAULT_LOCALE("obs-spotify-overlay-plugin", "en-US")
 
 bool obs_module_load(void)
 {
