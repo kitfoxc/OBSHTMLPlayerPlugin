@@ -14,7 +14,10 @@ Works for Spotify, YoutubeMusic desktop clients, and Apple Music. More services 
 
 # How to use
 
-Download the latest release from the releases page. Unzip, and put all 4 files in your OBS plugins directory (usually something like `C:\Program Files\OBS\obs-plugins\64bit\`). Launch OBS and add a new source, choose the new option called Now Playing Widget. Configure the settings using the built in options.
+Download the latest release from the releases page. Unzip into the root of your OBS directory (usually something like `C:\Program Files\obs-studio\`). Launch OBS and add a new source, choose the new option called Now Playing Widget. Configure the settings using the built in options.
+
+<img width="1037" height="414" alt="obsplugininstallinstructions" src="https://github.com/user-attachments/assets/2b5765cf-1afe-4489-970a-1a52e7b46357" />
+
 
 # Known limitations
 
