@@ -233,8 +233,10 @@ struct spotify_source {
 	double artist_avg_char_px = 7.0;
 	double title_scroll_max_px = 0.0;
 	double artist_scroll_max_px = 0.0;
-	bool title_scroll_paused = false;
-	bool artist_scroll_paused = false;
+	bool title_scroll_paused_at_end = false;
+	bool artist_scroll_paused_at_end = false;
+	bool title_scroll_paused_at_start = false;
+	bool artist_scroll_paused_at_start = false;
 	std::chrono::steady_clock::time_point title_pause_start{};
 	std::chrono::steady_clock::time_point artist_pause_start{};
 	std::chrono::steady_clock::time_point last_scroll_tick{};
@@ -628,12 +630,15 @@ static void poll_loop(spotify_source *ctx)
 		if (has) {
 			gap_active = false;
 			ctx->is_playing = info.IsPlaying;
+			auto now = std::chrono::steady_clock::now();
 
 			if (track_changed) {
-				if (info.ImageData != nullptr && info.ImageLength > 0)
+				if (info.ImageData != nullptr && info.ImageLength > 0) {
 					ctx->last_image.assign(info.ImageData, info.ImageData + info.ImageLength);
-				else
+				} else {
 					ctx->last_image.clear();
+				}
+
 				ctx->last_song = title;
 				ctx->last_artist = artist;
 				ctx->have_track = true;
@@ -641,8 +646,12 @@ static void poll_loop(spotify_source *ctx)
 				// New track -- restart the marquee from the beginning.
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused = false;
-				ctx->artist_scroll_paused = false;
+				ctx->title_scroll_paused_at_end = false;
+				ctx->artist_scroll_paused_at_end = false;
+				ctx->title_scroll_paused_at_start = true;
+				ctx->artist_scroll_paused_at_start = true;
+				ctx->title_pause_start = now;
+				ctx->artist_pause_start = now;
 				ctx->last_scroll_tick = std::chrono::steady_clock::now();
 
 				compose_bitmap(ctx, title, artist,
@@ -651,8 +660,12 @@ static void poll_loop(spotify_source *ctx)
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused = false;
-				ctx->artist_scroll_paused = false;
+				ctx->title_scroll_paused_at_end = false;
+				ctx->artist_scroll_paused_at_end = false;
+				ctx->title_scroll_paused_at_start = true;
+				ctx->artist_scroll_paused_at_start = true;
+				ctx->title_pause_start = now;
+				ctx->artist_pause_start = now;
 				compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
 					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
 					       (int)ctx->last_image.size(), snapshot_settings(ctx));
@@ -673,8 +686,12 @@ static void poll_loop(spotify_source *ctx)
 				gap_active = false;
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused = false;
-				ctx->artist_scroll_paused = false;
+				ctx->title_scroll_paused_at_end = false;
+				ctx->artist_scroll_paused_at_end = false;
+				ctx->title_scroll_paused_at_start = true;
+				ctx->artist_scroll_paused_at_start = true;
+				ctx->title_pause_start = std::chrono::steady_clock::now();
+				ctx->artist_pause_start = std::chrono::steady_clock::now();
 				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
@@ -705,17 +722,26 @@ static void poll_loop(spotify_source *ctx)
 						ctx->last_scroll_tick = now;
 
 						if (ctx->title_needs_scroll) {
-							if (ctx->title_scroll_paused) {
-								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
-									ctx->title_scroll_px = 0.0;
-									ctx->title_scroll_paused = false;
-									needCompose = true;
+							if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
+								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) 
+								{
+									if (ctx->title_scroll_paused_at_end) {
+										ctx->title_scroll_px = 0.0;
+										ctx->title_scroll_paused_at_end = false;
+										ctx->title_scroll_paused_at_start = true;
+										ctx->title_pause_start = now;
+										needCompose = true;
+									} else {
+										ctx->title_scroll_paused_at_start = false;
+										needCompose = true;
+									}
 								}
 							} else {
 								ctx->title_scroll_px += ctx->title_avg_char_px;
-								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
+								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) 
+								{
 									ctx->title_scroll_px = ctx->title_scroll_max_px;
-									ctx->title_scroll_paused = true;
+									ctx->title_scroll_paused_at_end = true;
 									ctx->title_pause_start = now;
 								}
 								needCompose = true;
@@ -723,19 +749,28 @@ static void poll_loop(spotify_source *ctx)
 						}
 
 						if (ctx->artist_needs_scroll) {
-							if (ctx->artist_scroll_paused) {
-								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
-									ctx->artist_scroll_px = 0.0;
-									ctx->artist_scroll_paused = false;
-									needCompose = true;
+							if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
+								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE)
+								{
+									if (ctx->artist_scroll_paused_at_end) {
+
+										ctx->artist_scroll_px = 0.0;
+										ctx->artist_scroll_paused_at_end = false;
+										ctx->artist_scroll_paused_at_start = true;
+										ctx->artist_pause_start = now;
+										needCompose = true;
+									} else {
+										ctx->artist_scroll_paused_at_start = false;
+										needCompose = true;
+									}
 								}
 							} else {
 								ctx->artist_scroll_px += ctx->artist_avg_char_px;
-								if (ctx->artist_scroll_px >=
-								    ctx->artist_scroll_max_px) {
+								if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) 
+								{
 									ctx->artist_scroll_px =
 										ctx->artist_scroll_max_px;
-									ctx->artist_scroll_paused = true;
+									ctx->artist_scroll_paused_at_end = true;
 									ctx->artist_pause_start = now;
 								}
 								needCompose = true;
