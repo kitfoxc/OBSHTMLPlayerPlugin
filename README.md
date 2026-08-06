@@ -10,7 +10,9 @@ Vertical layout enable:
 
 This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. This is all native inside of OBS.
 
-Works for Spotify, YoutubeMusic desktop clients, and Apple Music. More services may be added later if they are requested and I can reasonably get a copy of the program.
+Works for Spotify, YoutubeMusic desktop clients, and Apple Music. As of version 1.10, VLC player is also supported, but requires a VLC plugin to actually function. You can find the required VLC plugin here: https://github.com/spmn/vlc-win10smtc . Make sure to read the installation instructions thoroughly, as it is not installed like a "normal" VLC plugin, you need to configure it or it will not do anything.
+
+More services may be added later if they are requested and I can reasonably get a copy of the program.
 
 # How to use
 
