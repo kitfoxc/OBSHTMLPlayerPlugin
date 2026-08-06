@@ -173,6 +173,34 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	g.SetClip(&savedClip);
 }
 
+
+struct CachedFont {
+	std::unique_ptr<Font> font;
+	std::string face;
+	std::string style;
+	int size = -1;
+	int flags = -1;
+};
+
+Font *EnsureFont(CachedFont &cache, const std::string &face, const std::string &style, int size, int flags)
+{
+	if (!cache.font || cache.face != face || cache.style != style || cache.size != size || cache.flags != flags) {
+		FontFamily requestedFam(Utf8ToWide(face).c_str());
+		const FontFamily *fam = &requestedFam;
+		if (requestedFam.GetLastStatus() != Ok)
+			fam = FontFamily::GenericSansSerif();
+
+		FontStyle gdiStyle = ParseFontStyle(style, flags);
+		cache.font = std::make_unique<Font>(fam, (REAL)size, gdiStyle, UnitPixel);
+
+		cache.face = face;
+		cache.style = style;
+		cache.size = size;
+		cache.flags = flags;
+	}
+	return cache.font.get();
+}
+
 } // namespace
 
 struct spotify_source {
@@ -222,7 +250,7 @@ struct spotify_source {
 
 	std::string last_song;
 	std::string last_artist;
-	std::vector<uint8_t> last_image;
+	std::unique_ptr<Image> cached_art_image;
 	bool have_track = false;
 
 	bool title_needs_scroll = false;
@@ -253,6 +281,9 @@ struct spotify_source {
 	std::unique_ptr<Bitmap> cached_bitmap;
 	int cached_bitmap_w = 0;
 	int cached_bitmap_h = 0;
+
+	CachedFont title_font_cache;
+	CachedFont artist_font_cache;
 };
 
 struct AppearanceSettings {
@@ -355,20 +386,37 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
-static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist,
-			   const uint8_t *image_data, int image_len, const AppearanceSettings &s)
+
+static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int image_len)
+{
+	ctx->cached_art_image.reset();
+	if (image_data == nullptr || image_len <= 0)
+		return;
+
+	IStream *stream = SHCreateMemStream(image_data, (UINT)image_len);
+	if (!stream)
+		return;
+
+	auto img = std::make_unique<Image>(stream);
+	stream->Release();
+
+	if (img->GetLastStatus() == Ok)
+		ctx->cached_art_image = std::move(img);
+}
+
+static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s)
 {
 	const int cardW = std::max(s.card_w, 50);
 	const int cardH = std::max(s.card_h, 30);
 
-	if (!ctx->cached_bitmap || ctx->cached_bitmap_w != cardW || ctx->cached_bitmap_h != cardH) 
-	{
+	if (!ctx->cached_bitmap || ctx->cached_bitmap_w != cardW || ctx->cached_bitmap_h != cardH) {
 		ctx->cached_bitmap = std::make_unique<Bitmap>(cardW, cardH, PixelFormat32bppARGB);
 		ctx->cached_bitmap_w = cardW;
 		ctx->cached_bitmap_h = cardH;
 	}
 	Bitmap &card = *ctx->cached_bitmap;
 	Graphics g(&card);
+
 	g.SetSmoothingMode(SmoothingModeHighQuality);
 	g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
 	g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
@@ -380,29 +428,11 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
 	g.FillPath(&bgBrush, &bgPath);
 
-	//title font
-	FontFamily requestedFamTitle(Utf8ToWide(s.title_font_face).c_str());
-	const FontFamily *famTitle = &requestedFamTitle;
-	if (requestedFamTitle.GetLastStatus() != Ok) 
-	{
-		famTitle = FontFamily::GenericSansSerif();
-	}
-	FontStyle styleTitle = ParseFontStyle(s.title_font_style, s.title_font_flags);
-
-	//artist font
-	FontFamily requestedFamArtist(Utf8ToWide(s.artist_font_face).c_str());
-	const FontFamily *famArtist = &requestedFamArtist;
-	if (requestedFamArtist.GetLastStatus() != Ok) {
-		famArtist = FontFamily::GenericSansSerif();
-	}
-	FontStyle styleArtist = ParseFontStyle(s.artist_font_style, s.artist_font_flags);
-
 	int titleSize = s.title_font_size > 0 ? s.title_font_size : 16;
 	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : 14;
 
-	Font titleFont(famTitle, (REAL)titleSize, styleTitle, UnitPixel);
-
-	Font artistFont(famArtist, (REAL)artistSize, styleArtist, UnitPixel);
+	Font &titleFont = *EnsureFont(ctx->title_font_cache, s.title_font_face, s.title_font_style, titleSize, s.title_font_flags);
+	Font &artistFont = *EnsureFont(ctx->artist_font_cache, s.artist_font_face, s.artist_font_style, artistSize, s.artist_font_flags);
 
 	Color titleColor = ObsColorToGdip(s.title_color);
 	Color artistColor = ObsColorToGdip(s.artist_color);
@@ -512,16 +542,9 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		g.SetClip(&artClip);
 
 		bool drewArt = false;
-		if (image_data != nullptr && image_len > 0) {
-			IStream *stream = SHCreateMemStream(image_data, (UINT)image_len);
-			if (stream) {
-				Image img(stream);
-				if (img.GetLastStatus() == Ok) {
-					g.DrawImage(&img, artRect);
-					drewArt = true;
-				}
-				stream->Release();
-			}
+		if (ctx->cached_art_image) {
+			g.DrawImage(ctx->cached_art_image.get(), artRect);
+			drewArt = true;
 		}
 		if (!drewArt && s.show_goat_placeholder) {
 			Image *goat = GetGoatImage(ctx);
@@ -538,12 +561,11 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	}
 
 	// text (shared drawing code)
-	std::string displayTitle = title;
-	std::string displayArtist = artist;
-	if (!ctx->have_track && s.show_plugin_attribution) {
-		displayTitle = "NowPlayingWidget by lingeriegoat";
-		displayArtist = "Play some music to get started";
-	}
+	static const std::string kAttributionTitle = "NowPlayingWidget by lingeriegoat";
+	static const std::string kAttributionArtist = "Play some music to get started";
+	bool useAttribution = !ctx->have_track && s.show_plugin_attribution;
+	const std::string &displayTitle = useAttribution ? kAttributionTitle : title;
+	const std::string &displayArtist = useAttribution ? kAttributionArtist : artist;
 
 	std::wstring wtitle = Utf8ToWide(displayTitle);
 	std::wstring wartist = Utf8ToWide(displayArtist);
@@ -643,11 +665,7 @@ static void poll_loop(spotify_source *ctx)
 			auto now = std::chrono::steady_clock::now();
 
 			if (track_changed) {
-				if (info.ImageData != nullptr && info.ImageLength > 0) {
-					ctx->last_image.assign(info.ImageData, info.ImageData + info.ImageLength);
-				} else {
-					ctx->last_image.clear();
-				}
+				UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
 
 				ctx->last_song = title;
 				ctx->last_artist = artist;
@@ -662,10 +680,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->title_pause_start = now;
 				ctx->artist_pause_start = now;
 				ctx->last_scroll_tick = std::chrono::steady_clock::now();
-
-				compose_bitmap(ctx, title, artist,
-					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
-					       (int)ctx->last_image.size(), snapshot_settings(ctx));
+				compose_bitmap(ctx, title, artist, snapshot_settings(ctx));
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
@@ -675,9 +690,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_scroll_paused_at_start = true;
 				ctx->title_pause_start = now;
 				ctx->artist_pause_start = now;
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
-					       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
-					       (int)ctx->last_image.size(), snapshot_settings(ctx));
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 			}
 		} else if (ctx->have_track) {
 			ctx->is_playing = false;
@@ -690,7 +703,7 @@ static void poll_loop(spotify_source *ctx)
 			if (std::chrono::steady_clock::now() - gap_start >= MISSING_SESSION_GRACE) {
 				ctx->last_song.clear();
 				ctx->last_artist.clear();
-				ctx->last_image.clear();
+				UpdateCachedArt(ctx, nullptr, 0);
 				ctx->have_track = false;
 				gap_active = false;
 				ctx->title_scroll_px = 0.0;
@@ -701,24 +714,22 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_scroll_paused_at_start = true;
 				ctx->title_pause_start = std::chrono::steady_clock::now();
 				ctx->artist_pause_start = std::chrono::steady_clock::now();
-				compose_bitmap(ctx, "", "", nullptr, 0, snapshot_settings(ctx));
+				compose_bitmap(ctx, "", "", snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
-			compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
-				       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
-				       (int)ctx->last_image.size(), snapshot_settings(ctx));
+			compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 		}
 		ctx->settings_dirty = false;
 
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
+		
+		AppearanceSettings s = snapshot_settings(ctx);
+
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
 			if (ctx->settings_dirty)
 				break; // let the outer loop apply the appearance change immediately
-
-			AppearanceSettings s{};
-			s = snapshot_settings(ctx);
 
 			if (ctx->have_track || s.show_plugin_attribution) {
 				auto now = std::chrono::steady_clock::now();
@@ -745,7 +756,7 @@ static void poll_loop(spotify_source *ctx)
 								}
 							} else {
 								ctx->title_scroll_px += ctx->title_avg_char_px;
-								if (ctx->title_scroll_px >= ctx->title_scroll_max_px)
+								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) 
 								{
 									ctx->title_scroll_px = ctx->title_scroll_max_px;
 									ctx->title_scroll_paused_at_end = true;
@@ -807,9 +818,7 @@ static void poll_loop(spotify_source *ctx)
 				}
 
 				if (needCompose) {
-					compose_bitmap(ctx, ctx->last_song, ctx->last_artist,
-						       ctx->last_image.empty() ? nullptr : ctx->last_image.data(),
-						       (int)ctx->last_image.size(), s);
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
 				}
 			}
 
