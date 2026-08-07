@@ -75,10 +75,9 @@ constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
 constexpr int VU_GAP_BEFORE_TEXT = 10;
 
-// Progress bar geometry (not exposed as settings -- these are fixed layout
-// details, same idea as VU_BAR_GAP/GAP_ART_TEXT elsewhere in this file)
-constexpr int PROGRESS_BAR_HEIGHT = 4;
-constexpr int PROGRESS_BAR_GAP = 6;      // gap between artist text and the bar
+// Progress bar geometry
+constexpr int DEFAULT_PROGRESS_BAR_HEIGHT = 6;
+constexpr int DEFAULT_PROGRESS_BAR_GAP = 6;      // gap between artist text and the bar
 constexpr int PROGRESS_UPDATE_MS = 1000; // how often the bar redraws while a track is loaded
 
 ULONG_PTR g_gdiplusToken = 0;
@@ -250,6 +249,8 @@ struct spotify_source {
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
 	int text_offset_y = 0;
+	int progress_bar_gap = DEFAULT_PROGRESS_BAR_GAP;
+	int progress_bar_height = DEFAULT_PROGRESS_BAR_HEIGHT;
 	int scroll_speed_ms = DEFAULT_SCROLL_SPEED_MS; // ms per letter for the marquee scroll
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
@@ -349,6 +350,8 @@ struct AppearanceSettings {
 	int card_w;
 	int card_h;
 	int text_offset_y;
+	int progress_bar_gap;
+	int progress_bar_height;
 	int scroll_speed_ms;
 	bool vu_meter_enabled;
 	long long vu_color;
@@ -547,7 +550,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	int titleLineH = titleSize + 10;
 	int artistLineH = artistSize + 8;
-	int progressH = s.show_progress_bar ? (PROGRESS_BAR_GAP + PROGRESS_BAR_HEIGHT) : 0;
+	int progressH = s.show_progress_bar ? (s.progress_bar_gap + s.progress_bar_height) : 0;
 	int blockH = titleLineH + artistLineH + progressH;
 
 	int artSize = 0;
@@ -596,8 +599,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		artistRect = RectF((REAL)textX, (REAL)(textTop + titleLineH), (REAL)textW, (REAL)artistLineH);
 
 		if (s.show_progress_bar) {
-			int progressY = textTop + titleLineH + artistLineH + PROGRESS_BAR_GAP;
-			progressBarRect = Rect(textX, progressY, textW, PROGRESS_BAR_HEIGHT);
+			int progressY = textTop + titleLineH + artistLineH + s.progress_bar_gap;
+			progressBarRect = Rect(textX, progressY, textW, s.progress_bar_height);
 		}
 
 		if (s.vu_meter_enabled) {
@@ -636,8 +639,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		artistRect = RectF((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
 
 		if (s.show_progress_bar) {
-			int progressY = topY + titleLineH + artistLineH + PROGRESS_BAR_GAP;
-			progressBarRect = Rect(textX, progressY, textW, PROGRESS_BAR_HEIGHT);
+			int progressY = topY + titleLineH + artistLineH + s.progress_bar_gap;
+			progressBarRect = Rect(textX, progressY, textW, s.progress_bar_height);
 		}
 
 		if (s.vu_meter_enabled) {
@@ -728,40 +731,45 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color,
-				  ctx->artist_color,
-				  ctx->bg_color,
-				  ctx->bg_opacity,
-				  ctx->background_corner_radius,
-				  ctx->album_art_corner_radius,
-				  ctx->title_font_face,
-				  ctx->title_font_style,
-				  ctx->title_font_size,
-				  ctx->title_font_flags,
-				  ctx->artist_font_face,
-				  ctx->artist_font_style,
-				  ctx->artist_font_size,
-				  ctx->artist_font_flags,
-				  ctx->card_w,
-				  ctx->card_h,
-				  ctx->text_offset_y,
-				  ctx->scroll_speed_ms,
-				  ctx->vu_meter_enabled,
-				  ctx->vu_color,
-				  ctx->vu_update_ms,
-				  ctx->vu_randomness,
-				  ctx->vu_width,
-				  ctx->vu_height,
-				  ctx->vu_bar_count,
-				  ctx->vu_horizontal,
-				  ctx->vertical_layout,
-				  ctx->show_album_name,
-				  ctx->show_goat_placeholder,
-				  ctx->show_plugin_attribution,
-				  ctx->hide_album_art,
-				  ctx->show_progress_bar,
-				  ctx->progress_fill_color,
-				  ctx->progress_bg_color};
+	return AppearanceSettings
+	{
+		ctx->title_color,
+		ctx->artist_color,
+		ctx->bg_color,
+		ctx->bg_opacity,
+		ctx->background_corner_radius,
+		ctx->album_art_corner_radius,
+		ctx->title_font_face,
+		ctx->title_font_style,
+		ctx->title_font_size,
+		ctx->title_font_flags,
+		ctx->artist_font_face,
+		ctx->artist_font_style,
+		ctx->artist_font_size,
+		ctx->artist_font_flags,
+		ctx->card_w,
+		ctx->card_h,
+		ctx->text_offset_y,
+		ctx->progress_bar_gap,
+		ctx->progress_bar_height,
+		ctx->scroll_speed_ms,
+		ctx->vu_meter_enabled,
+		ctx->vu_color,
+		ctx->vu_update_ms,
+		ctx->vu_randomness,
+		ctx->vu_width,
+		ctx->vu_height,
+		ctx->vu_bar_count,
+		ctx->vu_horizontal,
+		ctx->vertical_layout,
+		ctx->show_album_name,
+		ctx->show_goat_placeholder,
+		ctx->show_plugin_attribution,
+		ctx->hide_album_art,
+		ctx->show_progress_bar,
+		ctx->progress_fill_color,
+		ctx->progress_bg_color
+	};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -1028,6 +1036,12 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->text_offset_y = (int)obs_data_get_int(settings, "text_offset_y");
 	ctx->text_offset_y = std::clamp(ctx->text_offset_y, -1000, 1000);
 
+	ctx->progress_bar_gap = (int)obs_data_get_int(settings, "progress_bar_gap");
+	ctx->progress_bar_gap = std::clamp(ctx->progress_bar_gap, -1000, 1000);
+
+	ctx->progress_bar_height = (int)obs_data_get_int(settings, "progress_bar_height");
+	ctx->progress_bar_height = std::clamp(ctx->progress_bar_height, 2, 1000);
+
 	ctx->scroll_speed_ms = (int)obs_data_get_int(settings, "scroll_speed_ms");
 	ctx->scroll_speed_ms = std::clamp(ctx->scroll_speed_ms, 20, 5000);
 
@@ -1099,10 +1113,10 @@ static void spotify_source_update(void *data, obs_data_t *settings)
 
 static void spotify_source_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_int(settings, "title_color", DEFAULT_COLOR_WHITE); // opaque white
+	obs_data_set_default_int(settings, "title_color", DEFAULT_COLOR_WHITE);
 	obs_data_set_default_int(settings, "artist_color", DEFAULT_COLOR_WHITE);
 
-	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK); //(long long)(((uint32_t)24 << 16) | ((uint32_t)20 << 8) | 20));
+	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
 	obs_data_set_default_int(settings, "background_corner_radius", DEFAULT_BACKGROUND_CORNER_RADIUS);
 	obs_data_set_default_int(settings, "album_art_corner_radius", DEFAULT_ALBUM_ART_CORNER_RADIUS);
@@ -1110,12 +1124,13 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "card_width", DEFAULT_CARD_W);
 	obs_data_set_default_int(settings, "card_height", DEFAULT_CARD_H);
 	obs_data_set_default_int(settings, "text_offset_y", 0);
+	obs_data_set_default_int(settings, "progress_bar_gap", DEFAULT_PROGRESS_BAR_GAP);
+	obs_data_set_default_int(settings, "progress_bar_height", DEFAULT_PROGRESS_BAR_HEIGHT);
 
 	obs_data_set_default_int(settings, "scroll_speed_ms", DEFAULT_SCROLL_SPEED_MS);
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
-	// Packed R | (G<<8) | (B<<16) | (A<<24) -- a Spotify-green-ish default (#1ED760)
-	obs_data_set_default_int(settings, "vu_color", DEFAULT_COLOR_GREEN);//(long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) | 0x1E));
+	obs_data_set_default_int(settings, "vu_color", DEFAULT_COLOR_GREEN);
 	obs_data_set_default_int(settings, "vu_update_ms", DEFAULT_VU_UPDATE_MS);
 	obs_data_set_default_int(settings, "vu_randomness", DEFAULT_VU_RANDOMNESS);
 
@@ -1131,8 +1146,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_album_name", false);
 
 	obs_data_set_default_bool(settings, "show_progress_bar", true);
-	obs_data_set_default_int(settings, "progress_fill_color", DEFAULT_COLOR_WHITE); // white	
-	obs_data_set_default_int(settings, "progress_bg_color", DEFAULT_COLOR_DARK_GREY); //(long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x5A << 16) | ((uint32_t)0x5A << 8) | 0x5A));
+	obs_data_set_default_int(settings, "progress_fill_color", DEFAULT_COLOR_WHITE);
+	obs_data_set_default_int(settings, "progress_bg_color", DEFAULT_COLOR_DARK_GREY);
 
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
@@ -1155,9 +1170,6 @@ static obs_properties_t *spotify_source_properties(void *)
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
-	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
-	obs_properties_add_color_alpha(props, "progress_fill_color", obs_module_text("ProgressFillColor"));
-	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
@@ -1170,7 +1182,12 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
 	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
-	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);	
+	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
+	obs_properties_add_color_alpha(props, "progress_fill_color", obs_module_text("ProgressFillColor"));
+	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
+	obs_properties_add_int(props, "progress_bar_height", obs_module_text("ProgressBarHeight"), 2, 1000, 1);
+	obs_properties_add_int(props, "progress_bar_gap", obs_module_text("ProgressBarGap"), -1000, 1000, 1);
 	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("ShowVUMeter"));
 	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VUMeterHorizontalOrientation"));
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VUMeterColor"));
