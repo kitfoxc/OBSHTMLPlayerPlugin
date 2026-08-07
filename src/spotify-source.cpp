@@ -48,15 +48,15 @@ using namespace Gdiplus;
 namespace {
 
 constexpr int POLL_INTERVAL_MS = 1000;
-constexpr int DEFAULT_CARD_W = 400;
-constexpr int DEFAULT_CARD_H = 110;
+constexpr int DEFAULT_CARD_W = 380;
+constexpr int DEFAULT_CARD_H = 100;
 constexpr int PAD = 12;
 constexpr int MIN_TEXT_W = 20;
 constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2);
 constexpr int MIN_ART_SIZE = 10;
 
 // VU meter geometry
-constexpr int VU_MAX_BAR_COUNT = 32;
+constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
 constexpr int VU_GAP_BEFORE_TEXT = 10;
 
@@ -243,6 +243,7 @@ struct spotify_source {
 	int vu_bar_count = 5;
 	bool vu_horizontal = false;
 	bool vertical_layout = false;
+	bool show_album_name = false;
 	bool show_goat_placeholder = true;
 	bool show_plugin_attribution = true;
 	bool hide_album_art = false;
@@ -339,6 +340,7 @@ struct AppearanceSettings {
 	int vu_bar_count;
 	bool vu_horizontal;
 	bool vertical_layout;
+	bool show_album_name;
 	bool show_goat_placeholder;
 	bool show_plugin_attribution;
 	bool hide_album_art;
@@ -732,6 +734,7 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->vu_bar_count,
 				  ctx->vu_horizontal,
 				  ctx->vertical_layout,
+				  ctx->show_album_name,
 				  ctx->show_goat_placeholder,
 				  ctx->show_plugin_attribution,
 				  ctx->hide_album_art,
@@ -756,6 +759,13 @@ static void poll_loop(spotify_source *ctx)
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
+
+		if (ctx->show_album_name)
+		{
+			std::string albumName = " - " + std::string(info.AlbumName);
+			artist.append(albumName);
+		}
+
 		bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) || (artist != ctx->last_artist);
 
 		if (has) {
@@ -1014,6 +1024,7 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->vu_horizontal = obs_data_get_bool(settings, "vu_horizontal");
 	ctx->vertical_layout = obs_data_get_bool(settings, "vertical_layout");
+	ctx->show_album_name = obs_data_get_bool(settings, "show_album_name");
 	ctx->show_goat_placeholder = obs_data_get_bool(settings, "show_goat_placeholder");
 	ctx->show_plugin_attribution = obs_data_get_bool(settings, "show_plugin_attribution");
 	ctx->hide_album_art = obs_data_get_bool(settings, "hide_album_art");
@@ -1071,13 +1082,13 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "card_height", DEFAULT_CARD_H);
 	obs_data_set_default_int(settings, "text_offset_y", 0);
 
-	obs_data_set_default_int(settings, "scroll_speed_ms", 300);
+	obs_data_set_default_int(settings, "scroll_speed_ms", 500);
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
 	// Packed R | (G<<8) | (B<<16) | (A<<24) -- a Spotify-green-ish default (#1ED760)
 	obs_data_set_default_int(settings, "vu_color", (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) | 0x1E));
-	obs_data_set_default_int(settings, "vu_update_ms", 250);
-	obs_data_set_default_int(settings, "vu_randomness", 50);
+	obs_data_set_default_int(settings, "vu_update_ms", 100);
+	obs_data_set_default_int(settings, "vu_randomness", 30);
 
 	obs_data_set_default_int(settings, "vu_width", 37);
 	obs_data_set_default_int(settings, "vu_height", 43);
@@ -1088,6 +1099,7 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_goat_placeholder", true);
 	obs_data_set_default_bool(settings, "show_plugin_attribution", true);
 	obs_data_set_default_bool(settings, "hide_album_art", false);
+	obs_data_set_default_bool(settings, "show_album_name", false);
 
 	obs_data_set_default_bool(settings, "show_progress_bar", true);
 	obs_data_set_default_int(settings, "progress_fill_color", 0xFFFFFFFF); // white	
@@ -1096,14 +1108,14 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(title_font_obj, "style", "Bold");
-	obs_data_set_default_int(title_font_obj, "size", 16);
+	obs_data_set_default_int(title_font_obj, "size", 22);
 	obs_data_set_default_obj(settings, "title_font", title_font_obj);
 	obs_data_release(title_font_obj);
 
 	obs_data_t *artist_font_obj = obs_data_create();
 	obs_data_set_default_string(artist_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(artist_font_obj, "style", "Regular");
-	obs_data_set_default_int(artist_font_obj, "size", 16);
+	obs_data_set_default_int(artist_font_obj, "size", 20);
 	obs_data_set_default_obj(settings, "artist_font", artist_font_obj);
 	obs_data_release(artist_font_obj);
 }
@@ -1119,6 +1131,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
+	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
