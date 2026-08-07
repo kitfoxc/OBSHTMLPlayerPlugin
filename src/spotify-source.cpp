@@ -54,6 +54,21 @@ constexpr int PAD = 12;
 constexpr int MIN_TEXT_W = 20;
 constexpr auto SCROLL_END_PAUSE = std::chrono::seconds(2);
 constexpr int MIN_ART_SIZE = 10;
+constexpr int DEFAULT_BACKGROUND_CORNER_RADIUS = 14;
+constexpr int DEFAULT_ALBUM_ART_CORNER_RADIUS = 8;
+constexpr int DEFAULT_BG_OPACITY = 70;
+constexpr int DEFAULT_SCROLL_SPEED_MS = 500;
+constexpr int DEFAULT_VU_UPDATE_MS = 100;
+constexpr int DEFAULT_VU_WIDTH = 37;
+constexpr int DEFAULT_VU_HEIGHT = 43;
+constexpr int DEFAULT_VU_BAR_COUNT = 5;
+constexpr int DEFAULT_VU_RANDOMNESS = 30;
+constexpr int DEFAULT_TITLE_FONT_SIZE = 22;
+constexpr int DEFAULT_ARTIST_FONT_SIZE = 20;
+constexpr int DEFAULT_COLOR_WHITE = 0xFFFFFFFF;
+constexpr int DEFAULT_COLOR_BLACK = 0x00000000;
+constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
+constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
 
 // VU meter geometry
 constexpr int VU_MAX_BAR_COUNT = 50;
@@ -221,7 +236,9 @@ struct spotify_source {
 	long long title_color = 0xFFFFFFFF;
 	long long artist_color = 0xFFFFFFFF;
 	long long bg_color = 0;
-	int bg_opacity = 92; // percent, 0-100
+	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
+	int background_corner_radius = DEFAULT_BACKGROUND_CORNER_RADIUS;
+	int album_art_corner_radius = DEFAULT_ALBUM_ART_CORNER_RADIUS;
 	std::string title_font_face = "Segoe UI";
 	std::string title_font_style = "Regular";
 	int title_font_size = 16;
@@ -233,7 +250,7 @@ struct spotify_source {
 	int card_w = DEFAULT_CARD_W;
 	int card_h = DEFAULT_CARD_H;
 	int text_offset_y = 0;
-	int scroll_speed_ms = 300; // ms per letter for the marquee scroll
+	int scroll_speed_ms = DEFAULT_SCROLL_SPEED_MS; // ms per letter for the marquee scroll
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
 	int vu_update_ms = 250;
@@ -319,6 +336,8 @@ struct AppearanceSettings {
 	long long artist_color;
 	long long bg_color;
 	int bg_opacity;
+	int background_corner_radius;
+	int album_art_corner_radius;
 	std::string title_font_face;
 	std::string title_font_style;
 	int title_font_size;
@@ -512,11 +531,11 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	// card background
 	SolidBrush bgBrush(ObsColorToGdipWithAlpha(s.bg_color, s.bg_opacity));
 	GraphicsPath bgPath;
-	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), 14);
+	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), s.background_corner_radius);
 	g.FillPath(&bgBrush, &bgPath);
 
-	int titleSize = s.title_font_size > 0 ? s.title_font_size : 16;
-	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : 14;
+	int titleSize = s.title_font_size > 0 ? s.title_font_size : DEFAULT_TITLE_FONT_SIZE;
+	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : DEFAULT_ARTIST_FONT_SIZE;
 
 	Font &titleFont = *EnsureFont(ctx->title_font_cache, s.title_font_face, s.title_font_style, titleSize, s.title_font_flags);
 	Font &artistFont = *EnsureFont(ctx->artist_font_cache, s.artist_font_face, s.artist_font_style, artistSize, s.artist_font_flags);
@@ -633,7 +652,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	if (showArt) {
 		GraphicsPath artClip;
-		AddRoundedRect(artClip, artRect, 8);
+		AddRoundedRect(artClip, artRect, s.album_art_corner_radius);
 
 		Region savedClip;
 		g.GetClip(&savedClip);
@@ -713,6 +732,8 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->artist_color,
 				  ctx->bg_color,
 				  ctx->bg_opacity,
+				  ctx->background_corner_radius,
+				  ctx->album_art_corner_radius,
 				  ctx->title_font_face,
 				  ctx->title_font_style,
 				  ctx->title_font_size,
@@ -992,6 +1013,12 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->bg_opacity = (int)obs_data_get_int(settings, "bg_opacity");
 	ctx->bg_opacity = std::clamp(ctx->bg_opacity, 0, 100);
 
+	ctx->background_corner_radius = (int)obs_data_get_int(settings, "background_corner_radius");
+	ctx->background_corner_radius = std::clamp(ctx->background_corner_radius, 0, 100);
+
+	ctx->album_art_corner_radius= (int)obs_data_get_int(settings, "album_art_corner_radius");
+	ctx->album_art_corner_radius = std::clamp(ctx->album_art_corner_radius, 0, 100);
+
 	ctx->card_w = (int)obs_data_get_int(settings, "card_width");
 	ctx->card_w = std::clamp(ctx->card_w, 50, 4000);
 
@@ -1044,7 +1071,7 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 		obs_data_release(title_font_obj);
 	}
 	if (ctx->title_font_size <= 0) {
-		ctx->title_font_size = 16;
+		ctx->title_font_size = DEFAULT_TITLE_FONT_SIZE;
 	}
 
 	obs_data_t *artist_font_obj = obs_data_get_obj(settings, "artist_font");
@@ -1058,7 +1085,7 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 		obs_data_release(artist_font_obj);
 	}
 	if (ctx->artist_font_size <= 0) {
-		ctx->artist_font_size = 14;
+		ctx->artist_font_size = DEFAULT_ARTIST_FONT_SIZE;
 	}
 
 	ctx->settings_dirty = true;
@@ -1072,27 +1099,29 @@ static void spotify_source_update(void *data, obs_data_t *settings)
 
 static void spotify_source_defaults(obs_data_t *settings)
 {
-	obs_data_set_default_int(settings, "title_color", 0xFFFFFFFF); // opaque white
-	obs_data_set_default_int(settings, "artist_color", 0xFFFFFFFF);
+	obs_data_set_default_int(settings, "title_color", DEFAULT_COLOR_WHITE); // opaque white
+	obs_data_set_default_int(settings, "artist_color", DEFAULT_COLOR_WHITE);
 
-	obs_data_set_default_int(settings, "bg_color", (long long)(((uint32_t)24 << 16) | ((uint32_t)20 << 8) | 20));
-	obs_data_set_default_int(settings, "bg_opacity", 92);
+	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK); //(long long)(((uint32_t)24 << 16) | ((uint32_t)20 << 8) | 20));
+	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
+	obs_data_set_default_int(settings, "background_corner_radius", DEFAULT_BACKGROUND_CORNER_RADIUS);
+	obs_data_set_default_int(settings, "album_art_corner_radius", DEFAULT_ALBUM_ART_CORNER_RADIUS);
 
 	obs_data_set_default_int(settings, "card_width", DEFAULT_CARD_W);
 	obs_data_set_default_int(settings, "card_height", DEFAULT_CARD_H);
 	obs_data_set_default_int(settings, "text_offset_y", 0);
 
-	obs_data_set_default_int(settings, "scroll_speed_ms", 500);
+	obs_data_set_default_int(settings, "scroll_speed_ms", DEFAULT_SCROLL_SPEED_MS);
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
 	// Packed R | (G<<8) | (B<<16) | (A<<24) -- a Spotify-green-ish default (#1ED760)
-	obs_data_set_default_int(settings, "vu_color", (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) | 0x1E));
-	obs_data_set_default_int(settings, "vu_update_ms", 100);
-	obs_data_set_default_int(settings, "vu_randomness", 30);
+	obs_data_set_default_int(settings, "vu_color", DEFAULT_COLOR_GREEN);//(long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) | 0x1E));
+	obs_data_set_default_int(settings, "vu_update_ms", DEFAULT_VU_UPDATE_MS);
+	obs_data_set_default_int(settings, "vu_randomness", DEFAULT_VU_RANDOMNESS);
 
-	obs_data_set_default_int(settings, "vu_width", 37);
-	obs_data_set_default_int(settings, "vu_height", 43);
-	obs_data_set_default_int(settings, "vu_bar_count", 5);
+	obs_data_set_default_int(settings, "vu_width", DEFAULT_VU_WIDTH);
+	obs_data_set_default_int(settings, "vu_height", DEFAULT_VU_HEIGHT);
+	obs_data_set_default_int(settings, "vu_bar_count", DEFAULT_VU_BAR_COUNT);
 	obs_data_set_default_bool(settings, "vu_horizontal", false);
 
 	obs_data_set_default_bool(settings, "vertical_layout", false);
@@ -1102,20 +1131,20 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_album_name", false);
 
 	obs_data_set_default_bool(settings, "show_progress_bar", true);
-	obs_data_set_default_int(settings, "progress_fill_color", 0xFFFFFFFF); // white	
-	obs_data_set_default_int(settings, "progress_bg_color", (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x5A << 16) | ((uint32_t)0x5A << 8) | 0x5A));
+	obs_data_set_default_int(settings, "progress_fill_color", DEFAULT_COLOR_WHITE); // white	
+	obs_data_set_default_int(settings, "progress_bg_color", DEFAULT_COLOR_DARK_GREY); //(long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x5A << 16) | ((uint32_t)0x5A << 8) | 0x5A));
 
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(title_font_obj, "style", "Bold");
-	obs_data_set_default_int(title_font_obj, "size", 22);
+	obs_data_set_default_int(title_font_obj, "size", DEFAULT_TITLE_FONT_SIZE);
 	obs_data_set_default_obj(settings, "title_font", title_font_obj);
 	obs_data_release(title_font_obj);
 
 	obs_data_t *artist_font_obj = obs_data_create();
 	obs_data_set_default_string(artist_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(artist_font_obj, "style", "Regular");
-	obs_data_set_default_int(artist_font_obj, "size", 20);
+	obs_data_set_default_int(artist_font_obj, "size", DEFAULT_ARTIST_FONT_SIZE);
 	obs_data_set_default_obj(settings, "artist_font", artist_font_obj);
 	obs_data_release(artist_font_obj);
 }
@@ -1134,12 +1163,14 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
+	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
+	obs_properties_add_int(props, "album_art_corner_radius", obs_module_text("AlbumArtCornerRadius"), 1, 100, 1);
 	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
 	obs_properties_add_font(props, "artist_font", obs_module_text("ArtistFont"));
 	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
 	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
-	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 20, 5000, 10);
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);
 	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("ShowVUMeter"));
 	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VUMeterHorizontalOrientation"));
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VUMeterColor"));
