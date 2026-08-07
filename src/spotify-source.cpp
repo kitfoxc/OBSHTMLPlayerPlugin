@@ -60,6 +60,12 @@ constexpr int VU_MAX_BAR_COUNT = 32;
 constexpr int VU_BAR_GAP = 3;
 constexpr int VU_GAP_BEFORE_TEXT = 10;
 
+// Progress bar geometry (not exposed as settings -- these are fixed layout
+// details, same idea as VU_BAR_GAP/GAP_ART_TEXT elsewhere in this file)
+constexpr int PROGRESS_BAR_HEIGHT = 4;
+constexpr int PROGRESS_BAR_GAP = 6;      // gap between artist text and the bar
+constexpr int PROGRESS_UPDATE_MS = 1000; // how often the bar redraws while a track is loaded
+
 ULONG_PTR g_gdiplusToken = 0;
 
 std::wstring Utf8ToWide(const std::string &utf8)
@@ -129,9 +135,8 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds,
-			double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll, double *outAvgCharPx,
-			double *outMaxOffsetPx)
+void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll,
+			double *outAvgCharPx, double *outMaxOffsetPx)
 {
 	*outNeedsScroll = false;
 	*outMaxOffsetPx = 0.0;
@@ -173,7 +178,10 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	g.SetClip(&savedClip);
 }
 
-
+// Caches a built Font alongside the settings it was built from, so repeated
+// calls with unchanged font settings (the common case -- font settings
+// change far less often than compose_bitmap runs) skip the FontFamily
+// lookup and Font construction entirely.
 struct CachedFont {
 	std::unique_ptr<Font> font;
 	std::string face;
@@ -238,6 +246,9 @@ struct spotify_source {
 	bool show_goat_placeholder = true;
 	bool show_plugin_attribution = true;
 	bool hide_album_art = false;
+	bool show_progress_bar = true;
+	long long progress_fill_color = 0xFFFFFFFF; // white
+	long long progress_bg_color = 0xFF5A5A5A;   // grey (packed R|G<<8|B<<16|A<<24)
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -274,6 +285,22 @@ struct spotify_source {
 	bool vu_was_playing = false;
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
+
+	// Playback position tracking for the progress bar. The bridge only
+	// reports position once per poll (~1s), so we interpolate between
+	// polls using how much wall-clock time has passed since the last
+	// sample, rather than only updating the bar in visible 1s jumps.
+	int64_t song_duration_ticks = 0;     // .NET TimeSpan ticks (100ns each)
+	int64_t playback_position_ticks = 0; // position as of position_sample_time
+	std::chrono::steady_clock::time_point position_sample_time{};
+	std::chrono::steady_clock::time_point last_progress_tick{};
+	// Highest position value actually displayed so far for the current
+	// track. A fresh sample can occasionally read a touch behind where
+	// we'd already extrapolated to (ordinary timing drift over the ~5s
+	// gap between real SMTC updates) -- rather than ever visibly stepping
+	// backward, we hold at this high point until the real value catches
+	// back up. Reset to 0 whenever the track changes.
+	int64_t max_displayed_position_ticks = 0;
 
 	std::unique_ptr<Image> goat_image;
 	bool goat_image_load_attempted = false;
@@ -315,6 +342,9 @@ struct AppearanceSettings {
 	bool show_goat_placeholder;
 	bool show_plugin_attribution;
 	bool hide_album_art;
+	bool show_progress_bar;
+	long long progress_fill_color;
+	long long progress_bg_color;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -364,6 +394,55 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 	}
 }
 
+// Draws the two-layer progress bar: a full-width background "track" (always
+// drawn when enabled, even at 0% or with unknown duration, so the reserved
+// layout space never just looks like an empty gap) plus a growing fill on
+// top. Position is interpolated using how much wall-clock time has passed
+// since the last bridge poll, so the fill advances smoothly rather than
+// only jumping once a second.
+static void DrawProgressBar(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &barRect)
+{
+	if (!s.show_progress_bar || barRect.Width <= 0 || barRect.Height <= 0)
+		return;
+
+	double frac = 0.0;
+	if (ctx->song_duration_ticks > 0) {
+		int64_t elapsedTicks = ctx->playback_position_ticks;
+		if (ctx->is_playing) {
+			double elapsedSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::steady_clock::now() - ctx->position_sample_time).count();
+			elapsedTicks += (int64_t)(elapsedSeconds * 1.0e7); // 1 tick = 100ns
+		}
+
+		// Never let the displayed position move backward -- if a fresh
+		// sample happens to read a touch behind where we'd already
+		// extrapolated to, just hold at the previous high point instead
+		// of visibly snapping back; the real value will catch up on its
+		// own within a poll or two.
+		if (elapsedTicks < ctx->max_displayed_position_ticks)
+			elapsedTicks = ctx->max_displayed_position_ticks;
+		else
+			ctx->max_displayed_position_ticks = elapsedTicks;
+
+		frac = std::clamp((double)elapsedTicks / (double)ctx->song_duration_ticks, 0.0, 1.0);
+	}
+
+	Color bgColor = ObsColorToGdip(s.progress_bg_color);
+	SolidBrush bgBrush(bgColor);
+	GraphicsPath bgPath;
+	AddRoundedRect(bgPath, barRect, barRect.Height / 2);
+	g.FillPath(&bgBrush, &bgPath);
+
+	int fillWidth = (int)std::lround(barRect.Width * frac);
+	if (fillWidth > 0) {
+		Rect fillRect(barRect.X, barRect.Y, fillWidth, barRect.Height);
+		Color fillColor = ObsColorToGdip(s.progress_fill_color);
+		SolidBrush fillBrush(fillColor);
+		GraphicsPath fillPath;
+		AddRoundedRect(fillPath, fillRect, barRect.Height / 2);
+		g.FillPath(&fillBrush, &fillPath);
+	}
+}
+
 static Image *GetGoatImage(spotify_source *ctx)
 {
 	if (ctx->goat_image_load_attempted)
@@ -386,7 +465,13 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
-
+// Decodes image_data (raw PNG/JPEG bytes from the bridge) exactly once and
+// caches the result on ctx. Called only when the track actually changes
+// (see poll_loop) -- compose_bitmap just draws whatever's cached here
+// without ever touching the raw bytes or re-decoding, since image decoding
+// is the single most expensive thing GDI+ does in this whole pipeline and
+// there's no reason to pay that cost on every scroll/VU tick when the art
+// itself hasn't changed.
 static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int image_len)
 {
 	ctx->cached_art_image.reset();
@@ -441,13 +526,15 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	int titleLineH = titleSize + 10;
 	int artistLineH = artistSize + 8;
-	int blockH = titleLineH + artistLineH;
+	int progressH = s.show_progress_bar ? (PROGRESS_BAR_GAP + PROGRESS_BAR_HEIGHT) : 0;
+	int blockH = titleLineH + artistLineH + progressH;
 
 	int artSize = 0;
 	Rect artRect;
 	RectF titleRect, artistRect;
 	bool centerText = false;
 	Rect vuBlockRect(0, 0, 0, 0);
+	Rect progressBarRect(0, 0, 0, 0);
 
 	bool showArt = !s.hide_album_art;
 
@@ -466,8 +553,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 			if (maxArtByWidth < MIN_ART_SIZE)
 				maxArtByWidth = MIN_ART_SIZE;
 
-			int reservedNonArt = PAD * 2 + GAP_ART_TEXT + blockH +
-					     (s.vu_meter_enabled ? (GAP_TEXT_VU + s.vu_height) : 0);
+			int reservedNonArt = PAD * 2 + GAP_ART_TEXT + blockH + (s.vu_meter_enabled ? (GAP_TEXT_VU + s.vu_height) : 0);
 			artSize = cardH - reservedNonArt;
 			if (artSize > maxArtByWidth)
 				artSize = maxArtByWidth;
@@ -488,8 +574,13 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		titleRect = RectF((REAL)textX, (REAL)textTop, (REAL)textW, (REAL)titleLineH);
 		artistRect = RectF((REAL)textX, (REAL)(textTop + titleLineH), (REAL)textW, (REAL)artistLineH);
 
+		if (s.show_progress_bar) {
+			int progressY = textTop + titleLineH + artistLineH + PROGRESS_BAR_GAP;
+			progressBarRect = Rect(textX, progressY, textW, PROGRESS_BAR_HEIGHT);
+		}
+
 		if (s.vu_meter_enabled) {
-			int vuTop = textTop + titleLineH + artistLineH + GAP_TEXT_VU;
+			int vuTop = textTop + blockH + GAP_TEXT_VU;
 			int vuLeft = (cardW - s.vu_width) / 2;
 			vuBlockRect = Rect(vuLeft, vuTop, s.vu_width, s.vu_height);
 		}
@@ -522,6 +613,11 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		int topY = (cardH - blockH) / 2 + s.text_offset_y;
 		titleRect = RectF((REAL)textX, (REAL)topY, (REAL)textW, (REAL)titleLineH);
 		artistRect = RectF((REAL)textX, (REAL)(topY + titleLineH), (REAL)textW, (REAL)artistLineH);
+
+		if (s.show_progress_bar) {
+			int progressY = topY + titleLineH + artistLineH + PROGRESS_BAR_GAP;
+			progressBarRect = Rect(textX, progressY, textW, PROGRESS_BAR_HEIGHT);
+		}
 
 		if (s.vu_meter_enabled) {
 			int vuRight = cardW - PAD;
@@ -573,10 +669,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
 	double titleMaxOffset = ctx->title_scroll_max_px, artistMaxOffset = ctx->artist_scroll_max_px;
-	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, &titleScroll,
-			   &titleAvgChar, &titleMaxOffset);
-	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText,
-			   &artistScroll, &artistAvgChar, &artistMaxOffset);
+	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, &titleScroll, &titleAvgChar, &titleMaxOffset);
+	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText, &artistScroll, &artistAvgChar, &artistMaxOffset);
 	ctx->title_needs_scroll = titleScroll;
 	ctx->artist_needs_scroll = artistScroll;
 	ctx->title_avg_char_px = titleAvgChar;
@@ -586,6 +680,9 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 
 	// VU meter (shared drawing code)
 	DrawVuMeter(g, ctx, s, vuBlockRect);
+
+	// Progress bar
+	DrawProgressBar(g, ctx, s, progressBarRect);
 
 	BitmapData bd;
 	Rect full(0, 0, cardW, cardH);
@@ -637,7 +734,10 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->vertical_layout,
 				  ctx->show_goat_placeholder,
 				  ctx->show_plugin_attribution,
-				  ctx->hide_album_art};
+				  ctx->hide_album_art,
+				  ctx->show_progress_bar,
+				  ctx->progress_fill_color,
+				  ctx->progress_bg_color};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -656,13 +756,26 @@ static void poll_loop(spotify_source *ctx)
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
-		bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) ||
-				     (artist != ctx->last_artist);
+		bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) || (artist != ctx->last_artist);
 
 		if (has) {
 			gap_active = false;
 			ctx->is_playing = info.IsPlaying;
 			auto now = std::chrono::steady_clock::now();
+
+			// Windows' media session (SMTC) only refreshes position roughly
+			// every 5s even though we poll every 1s -- re-stamping the
+			// sample time on every poll, even when the reported value
+			// hasn't actually moved, causes the interpolated bar to snap
+			// backward to the stale value each time we resample it. Only
+			// take a fresh sample when the value genuinely changed, or the
+			// track itself changed (which always needs a fresh baseline).
+			bool positionChanged = (info.CurrentPlaybackTimeTicks != ctx->playback_position_ticks) || (info.SongDurationTicks != ctx->song_duration_ticks);
+			if (track_changed || positionChanged) {
+				ctx->song_duration_ticks = info.SongDurationTicks;
+				ctx->playback_position_ticks = info.CurrentPlaybackTimeTicks;
+				ctx->position_sample_time = now;
+			}
 
 			if (track_changed) {
 				UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
@@ -670,6 +783,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_song = title;
 				ctx->last_artist = artist;
 				ctx->have_track = true;
+				ctx->max_displayed_position_ticks = 0; // fresh timeline for the new track
 
 				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
 				ctx->artist_scroll_px = 0.0;
@@ -680,6 +794,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->title_pause_start = now;
 				ctx->artist_pause_start = now;
 				ctx->last_scroll_tick = std::chrono::steady_clock::now();
+
 				compose_bitmap(ctx, title, artist, snapshot_settings(ctx));
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
@@ -704,6 +819,9 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_song.clear();
 				ctx->last_artist.clear();
 				UpdateCachedArt(ctx, nullptr, 0);
+				ctx->song_duration_ticks = 0;
+				ctx->playback_position_ticks = 0;
+				ctx->max_displayed_position_ticks = 0;
 				ctx->have_track = false;
 				gap_active = false;
 				ctx->title_scroll_px = 0.0;
@@ -724,7 +842,16 @@ static void poll_loop(spotify_source *ctx)
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
-		
+		// Settings only change via apply_settings() (which sets
+		// settings_dirty), and the check below still runs every 50ms on a
+		// plain atomic bool -- the moment a setting changes, this loop
+		// still exits within 50ms and the outer loop immediately
+		// recomposes with a fresh snapshot_settings() call. So it's safe
+		// to snapshot once per ~1s outer pass here rather than on every
+		// 50ms tick: this only skips the redundant mutex-lock-and-copy
+		// during the (common) stretches where nothing has actually
+		// changed, without adding any delay to how quickly a real
+		// settings change gets picked up.
 		AppearanceSettings s = snapshot_settings(ctx);
 
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
@@ -741,8 +868,7 @@ static void poll_loop(spotify_source *ctx)
 
 						if (ctx->title_needs_scroll) {
 							if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
-								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) 
-								{
+								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
 									if (ctx->title_scroll_paused_at_end) {
 										ctx->title_scroll_px = 0.0;
 										ctx->title_scroll_paused_at_end = false;
@@ -756,8 +882,7 @@ static void poll_loop(spotify_source *ctx)
 								}
 							} else {
 								ctx->title_scroll_px += ctx->title_avg_char_px;
-								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) 
-								{
+								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
 									ctx->title_scroll_px = ctx->title_scroll_max_px;
 									ctx->title_scroll_paused_at_end = true;
 									ctx->title_pause_start = now;
@@ -768,8 +893,7 @@ static void poll_loop(spotify_source *ctx)
 
 						if (ctx->artist_needs_scroll) {
 							if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
-								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) 
-								{
+								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
 									if (ctx->artist_scroll_paused_at_end) {
 										ctx->artist_scroll_px = 0.0;
 										ctx->artist_scroll_paused_at_end = false;
@@ -783,8 +907,7 @@ static void poll_loop(spotify_source *ctx)
 								}
 							} else {
 								ctx->artist_scroll_px += ctx->artist_avg_char_px;
-								if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) 
-								{
+								if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) {
 									ctx->artist_scroll_px = ctx->artist_scroll_max_px;
 									ctx->artist_scroll_paused_at_end = true;
 									ctx->artist_pause_start = now;
@@ -795,8 +918,7 @@ static void poll_loop(spotify_source *ctx)
 					}
 				}
 
-				if (s.vu_meter_enabled &&
-				    now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
+				if (s.vu_meter_enabled && now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
 					ctx->last_vu_tick = now;
 					int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
 					if (ctx->is_playing) {
@@ -815,6 +937,17 @@ static void poll_loop(spotify_source *ctx)
 						ctx->vu_was_playing = false;
 						needCompose = true;
 					}
+				}
+
+				// Progress bar redraw tick. Fires whenever a track is
+				// loaded, not just while playing -- this also catches a
+				// seek made while paused, since the outer poll loop only
+				// recomposes on track_changed/settings_dirty and would
+				// otherwise leave a stale bar position on screen for up
+				// to a second.
+				if (s.show_progress_bar && ctx->have_track && now - ctx->last_progress_tick >= std::chrono::milliseconds(PROGRESS_UPDATE_MS)) {
+					ctx->last_progress_tick = now;
+					needCompose = true;
 				}
 
 				if (needCompose) {
@@ -885,6 +1018,10 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->show_plugin_attribution = obs_data_get_bool(settings, "show_plugin_attribution");
 	ctx->hide_album_art = obs_data_get_bool(settings, "hide_album_art");
 
+	ctx->show_progress_bar = obs_data_get_bool(settings, "show_progress_bar");
+	ctx->progress_fill_color = obs_data_get_int(settings, "progress_fill_color");
+	ctx->progress_bg_color = obs_data_get_int(settings, "progress_bg_color");
+
 	obs_data_t *title_font_obj = obs_data_get_obj(settings, "title_font");
 	if (title_font_obj) {
 		const char *face = obs_data_get_string(title_font_obj, "face");
@@ -938,9 +1075,7 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
 	// Packed R | (G<<8) | (B<<16) | (A<<24) -- a Spotify-green-ish default (#1ED760)
-	obs_data_set_default_int(settings, "vu_color",
-				 (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) |
-					     0x1E));
+	obs_data_set_default_int(settings, "vu_color", (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x60 << 16) | ((uint32_t)0xD7 << 8) | 0x1E));
 	obs_data_set_default_int(settings, "vu_update_ms", 250);
 	obs_data_set_default_int(settings, "vu_randomness", 50);
 
@@ -953,6 +1088,10 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_goat_placeholder", true);
 	obs_data_set_default_bool(settings, "show_plugin_attribution", true);
 	obs_data_set_default_bool(settings, "hide_album_art", false);
+
+	obs_data_set_default_bool(settings, "show_progress_bar", true);
+	obs_data_set_default_int(settings, "progress_fill_color", 0xFFFFFFFF); // white	
+	obs_data_set_default_int(settings, "progress_bg_color", (long long)(((uint32_t)0xFF << 24) | ((uint32_t)0x5A << 16) | ((uint32_t)0x5A << 8) | 0x5A));
 
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
@@ -975,6 +1114,9 @@ static obs_properties_t *spotify_source_properties(void *)
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
+	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
+	obs_properties_add_color_alpha(props, "progress_fill_color", obs_module_text("ProgressFillColor"));
+	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
