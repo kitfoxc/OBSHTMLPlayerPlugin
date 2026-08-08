@@ -41,6 +41,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <cmath>
 #include <memory>
 #include <cstring>
+#include <fstream>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -154,8 +155,7 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll,
-			double *outAvgCharPx, double *outMaxOffsetPx)
+void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
 {
 	*outNeedsScroll = false;
 	*outMaxOffsetPx = 0.0;
@@ -515,6 +515,7 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
+
 static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path)
 {
 	if (path.empty()) {
@@ -526,15 +527,41 @@ static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path
 	if (ctx->cached_bg_image && ctx->cached_bg_image_path == path)
 		return ctx->cached_bg_image.get();
 
-	std::wstring wpath = Utf8ToWide(path);
-	auto img = std::make_unique<Image>(wpath.c_str());
-	if (img->GetLastStatus() != Ok) {
-		ctx->cached_bg_image.reset();
-		ctx->cached_bg_image_path.clear();
-		return nullptr;
-	}
+	ctx->cached_bg_image.reset();
+	ctx->cached_bg_image_path.clear();
 
-	ctx->cached_bg_image = std::move(img);
+	std::wstring wpath = Utf8ToWide(path);
+
+	std::ifstream file(wpath, std::ios::binary | std::ios::ate);
+	if (!file)
+		return nullptr;
+
+	std::streamsize fileSize = file.tellg();
+	if (fileSize <= 0)
+		return nullptr;
+	file.seekg(0, std::ios::beg);
+
+	std::vector<uint8_t> bytes((size_t)fileSize);
+	if (!file.read(reinterpret_cast<char *>(bytes.data()), fileSize))
+		return nullptr;
+	file.close();
+
+	IStream *stream = SHCreateMemStream(bytes.data(), (UINT)bytes.size());
+	if (!stream)
+		return nullptr;
+
+	auto img = std::make_unique<Image>(stream);
+	stream->Release();
+
+	if (img->GetLastStatus() != Ok)
+		return nullptr;
+
+	// Clone so the cached image no longer depends on the (already-released) stream.
+	auto cloned = std::unique_ptr<Image>(img->Clone());
+	if (!cloned || cloned->GetLastStatus() != Ok)
+		return nullptr;
+
+	ctx->cached_bg_image = std::move(cloned);
 	ctx->cached_bg_image_path = path;
 	return ctx->cached_bg_image.get();
 }
@@ -542,7 +569,7 @@ static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path
 static bool ArtBytesDiffer(const std::vector<uint8_t> &cached, const uint8_t *image_data, int image_len)
 {
 	if (image_data == nullptr || image_len <= 0)
-		return !cached.empty(); // SMTC dropped the art -- only a "change" if we currently have some cached
+		return !cached.empty(); 
 	if (cached.size() != (size_t)image_len)
 		return true;
 	return memcmp(cached.data(), image_data, (size_t)image_len) != 0;
@@ -563,10 +590,15 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	auto img = std::make_unique<Image>(stream);
 	stream->Release();
 
-	if (img->GetLastStatus() == Ok) {
-		ctx->cached_art_image = std::move(img);
-		ctx->last_art_bytes.assign(image_data, image_data + image_len);
-	}
+	if (img->GetLastStatus() != Ok)
+		return;
+
+	auto cloned = std::unique_ptr<Image>(img->Clone());
+	if (!cloned || cloned->GetLastStatus() != Ok)
+		return;
+
+	ctx->cached_art_image = std::move(cloned);
+	ctx->last_art_bytes.assign(image_data, image_data + image_len);
 }
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
@@ -821,47 +853,50 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color,
-				  ctx->artist_color,
-				  ctx->bg_color,
-				  ctx->bg_opacity,
-				  ctx->use_bg_image,
-				  ctx->bg_image_path,
-				  ctx->background_corner_radius,
-				  ctx->album_art_corner_radius,
-				  ctx->title_font_face,
-				  ctx->title_font_style,
-				  ctx->title_font_size,
-				  ctx->title_font_flags,
-				  ctx->artist_font_face,
-				  ctx->artist_font_style,
-				  ctx->artist_font_size,
-				  ctx->artist_font_flags,
-				  ctx->card_w,
-				  ctx->card_h,
-				  ctx->text_offset_y,
-				  ctx->progress_bar_gap,
-				  ctx->progress_bar_height,
-				  ctx->scroll_speed_ms,
-				  ctx->vu_meter_enabled,
-				  ctx->vu_color,
-				  ctx->vu_update_ms,
-				  ctx->vu_randomness,
-				  ctx->vu_width,
-				  ctx->vu_height,
-				  ctx->vu_bar_count,
-				  ctx->vu_horizontal,
-				  ctx->vertical_layout,
-				  ctx->show_album_name,
-				  ctx->show_goat_placeholder,
-				  ctx->show_plugin_attribution,
-				  ctx->hide_album_art,
-				  ctx->show_progress_bar,
-				  ctx->progress_fill_color,
-				  ctx->progress_bg_color,
-				  ctx->track_change_animation_enabled,
-				  ctx->autohide_enabled,
-				  ctx->autohide_after_s};
+	return AppearanceSettings
+	{
+		ctx->title_color, 
+		ctx->artist_color, 
+		ctx->bg_color, 
+		ctx->bg_opacity, 
+		ctx->use_bg_image, 
+		ctx->bg_image_path, 
+		ctx->background_corner_radius, 
+		ctx->album_art_corner_radius, 
+		ctx->title_font_face, 
+		ctx->title_font_style, 
+		ctx->title_font_size, 
+		ctx->title_font_flags, 
+		ctx->artist_font_face, 
+		ctx->artist_font_style, 
+		ctx->artist_font_size, 
+		ctx->artist_font_flags, 
+		ctx->card_w, 
+		ctx->card_h, 
+		ctx->text_offset_y, 
+		ctx->progress_bar_gap, 
+		ctx->progress_bar_height, 
+		ctx->scroll_speed_ms, 
+		ctx->vu_meter_enabled, 
+		ctx->vu_color, 
+		ctx->vu_update_ms, 
+		ctx->vu_randomness, 
+		ctx->vu_width, 
+		ctx->vu_height, 
+		ctx->vu_bar_count, 
+		ctx->vu_horizontal, 
+		ctx->vertical_layout, 
+		ctx->show_album_name, 
+		ctx->show_goat_placeholder, 
+		ctx->show_plugin_attribution, 
+		ctx->hide_album_art, 
+		ctx->show_progress_bar, 
+		ctx->progress_fill_color, 
+		ctx->progress_bg_color, 
+		ctx->track_change_animation_enabled, 
+		ctx->autohide_enabled, 
+		ctx->autohide_after_s
+	};
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
@@ -909,8 +944,13 @@ static void poll_loop(spotify_source *ctx)
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
-
-		if (ctx->show_album_name) {
+			
+		bool show_album_name;
+		{
+			std::lock_guard<std::mutex> lock(ctx->settings_mutex);
+			show_album_name = ctx->show_album_name;
+		}
+		if (show_album_name) {
 			std::string albumName = " - " + std::string(info.AlbumName);
 			artist.append(albumName);
 		}
@@ -1188,33 +1228,16 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color",
-	"artist_color",
-	"bg_color",
-	"bg_opacity",
-	"background_corner_radius",
-	"album_art_corner_radius",
-	"card_width",
-	"card_height",
-	"text_offset_y",
-	"progress_bar_gap",
-	"progress_bar_height",
-	"scroll_speed_ms",
-	"vu_color",
-	"vu_update_ms",
-	"vu_randomness",
-	"vu_width",
-	"vu_height",
-	"vu_bar_count",
-	"progress_fill_color",
-	"progress_bg_color",
-	"autohide_after_s",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius",
+	"card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", 
+	"vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", 
+	"progress_bg_color", "autohide_after_s",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image",          "vu_meter_enabled",        "vu_horizontal",  "vertical_layout",   "show_album_name",
-	"show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled",
-	"autohide_enabled",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", 
+	"show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", 
+	"show_progress_bar", "track_change_animation_enabled", "autohide_enabled",
 };
 
 static const char *const kSettingsStringKeys[] = {
@@ -1242,7 +1265,6 @@ static void export_known_settings(obs_data_t *settings, obs_data_t *out)
 		}
 	}
 }
-
 
 static void import_known_settings(obs_data_t *imported, obs_data_t *settings)
 {
@@ -1309,7 +1331,7 @@ static bool import_settings_modified(obs_properties_t *, obs_property_t *, obs_d
 
 		obs_data_set_string(settings, "import_settings_path", "");
 	}
-	return true; // refresh all property widgets so imported values show up immediately
+	return true; 
 }
 
 static void apply_settings(spotify_source *ctx, obs_data_t *settings)
@@ -1520,7 +1542,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
 	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
-	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);	
+	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
 	obs_properties_add_int(props, "album_art_corner_radius", obs_module_text("AlbumArtCornerRadius"), 1, 100, 1);
 	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
@@ -1544,7 +1566,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
 	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
-	
+
 	obs_property_t *export_settings_prop = obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
 	obs_property_set_modified_callback(export_settings_prop, export_settings_modified);
 
