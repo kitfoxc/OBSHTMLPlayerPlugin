@@ -39,6 +39,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <random>
 #include <cmath>
 #include <memory>
+#include <cstring>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -82,6 +83,10 @@ constexpr int PROGRESS_UPDATE_MS = 1000;    // how often the bar redraws while a
 
 // Track-change transition
 constexpr int TRACK_CHANGE_TRANSITION_MS = 300;
+
+// Autohide fade (both the fade-out once the delay elapses, and the fade-in on track change)
+constexpr int AUTOHIDE_FADE_MS = 1000;
+constexpr int DEFAULT_AUTOHIDE_AFTER_S = 5;
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -234,6 +239,16 @@ void BlendPixelBuffers(const std::vector<uint8_t> &from, const std::vector<uint8
 	}
 }
 
+
+void ScaleAlphaChannel(std::vector<uint8_t> &pixels, float alpha)
+{
+	if (alpha >= 0.999f)
+		return;
+	int mul = std::clamp((int)std::lround(alpha * 255.0f), 0, 255);
+	for (size_t i = 3; i < pixels.size(); i += 4)
+		pixels[i] = (uint8_t)(((int)pixels[i] * mul) / 255);
+}
+
 } // namespace
 
 struct spotify_source {
@@ -243,8 +258,8 @@ struct spotify_source {
 	std::atomic<bool> running{false};
 
 	std::mutex settings_mutex;
-	long long title_color = 0xFFFFFFFF;
-	long long artist_color = 0xFFFFFFFF;
+	long long title_color = DEFAULT_COLOR_WHITE;
+	long long artist_color = DEFAULT_COLOR_WHITE;
 	long long bg_color = 0;
 	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
 	int background_corner_radius = DEFAULT_BACKGROUND_CORNER_RADIUS;
@@ -277,9 +292,11 @@ struct spotify_source {
 	bool show_plugin_attribution = true;
 	bool hide_album_art = false;
 	bool show_progress_bar = true;
-	long long progress_fill_color = 0xFFFFFFFF; // white
-	long long progress_bg_color = 0xFF5A5A5A;   // grey (packed R|G<<8|B<<16|A<<24)
+	long long progress_fill_color = DEFAULT_COLOR_WHITE;
+	long long progress_bg_color = DEFAULT_COLOR_DARK_GREY;
 	bool track_change_animation_enabled = true;
+	bool autohide_enabled = false;
+	int autohide_after_s = DEFAULT_AUTOHIDE_AFTER_S;
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -293,6 +310,7 @@ struct spotify_source {
 	std::string last_song;
 	std::string last_artist;
 	std::unique_ptr<Image> cached_art_image;
+	std::vector<uint8_t> last_art_bytes; // raw bytes of the album art we last cached, for change detection
 	bool have_track = false;
 
 	bool title_needs_scroll = false;
@@ -338,6 +356,11 @@ struct spotify_source {
 	std::vector<uint8_t> transition_to_pixels;
 	uint32_t transition_w = 0, transition_h = 0;
 	std::chrono::steady_clock::time_point transition_start{};
+
+
+	float autohide_alpha = 1.0f;
+	std::chrono::steady_clock::time_point autohide_reference_time{};
+	std::chrono::steady_clock::time_point last_autohide_tick{};
 };
 
 struct AppearanceSettings {
@@ -378,6 +401,8 @@ struct AppearanceSettings {
 	long long progress_fill_color;
 	long long progress_bg_color;
 	bool track_change_animation_enabled;
+	bool autohide_enabled;
+	int autohide_after_s;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -488,11 +513,22 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
+static bool ArtBytesDiffer(const std::vector<uint8_t> &cached, const uint8_t *image_data, int image_len)
+{
+	if (image_data == nullptr || image_len <= 0)
+		return !cached.empty(); // SMTC dropped the art -- only a "change" if we currently have some cached
+	if (cached.size() != (size_t)image_len)
+		return true;
+	return memcmp(cached.data(), image_data, (size_t)image_len) != 0;
+}
+
 static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int image_len)
 {
 	ctx->cached_art_image.reset();
-	if (image_data == nullptr || image_len <= 0)
+	if (image_data == nullptr || image_len <= 0) {
+		ctx->last_art_bytes.clear();
 		return;
+	}
 
 	IStream *stream = SHCreateMemStream(image_data, (UINT)image_len);
 	if (!stream)
@@ -501,8 +537,10 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	auto img = std::make_unique<Image>(stream);
 	stream->Release();
 
-	if (img->GetLastStatus() == Ok)
+	if (img->GetLastStatus() == Ok) {
 		ctx->cached_art_image = std::move(img);
+		ctx->last_art_bytes.assign(image_data, image_data + image_len);
+	}
 }
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s)
@@ -711,6 +749,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		memcpy(buf.data() + (size_t)y * cardW * 4, src + (size_t)y * bd.Stride, (size_t)cardW * 4);
 	card.UnlockBits(&bd);
 
+	ScaleAlphaChannel(buf, ctx->autohide_alpha);
+
 	{
 		std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
 		ctx->pending_pixels = std::move(buf);
@@ -759,7 +799,39 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->show_progress_bar,
 				  ctx->progress_fill_color,
 				  ctx->progress_bg_color,
-				  ctx->track_change_animation_enabled};
+				  ctx->track_change_animation_enabled,
+				  ctx->autohide_enabled,
+				  ctx->autohide_after_s};
+}
+
+
+static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
+{
+	double dtMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->last_autohide_tick).count();
+	ctx->last_autohide_tick = now;
+	if (dtMs <= 0.0 || dtMs > 2000.0) // first call, or a long gap since the last tick (e.g. the card was hidden)
+		dtMs = 50.0;
+
+	float target = 1.0f;
+	if (s.autohide_enabled) {
+		if (obs_source_active(ctx->source)) {
+			double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->autohide_reference_time).count();
+			double delayMs = (double)std::max(0, s.autohide_after_s) * 1000.0;
+			if (elapsedMs >= delayMs)
+				target = 0.0f;
+		}
+	}
+
+	if (ctx->autohide_alpha == target)
+		return false;
+
+	double step = dtMs / (double)AUTOHIDE_FADE_MS;
+	if (target > ctx->autohide_alpha)
+		ctx->autohide_alpha = (float)std::min((double)target, (double)ctx->autohide_alpha + step);
+	else
+		ctx->autohide_alpha = (float)std::max((double)target, (double)ctx->autohide_alpha - step);
+
+	return true;
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -804,7 +876,8 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_song = title;
 				ctx->last_artist = artist;
 				ctx->have_track = true;
-				ctx->max_displayed_position_ticks = 0; // fresh timeline for the new track
+				ctx->max_displayed_position_ticks = 0; 
+				ctx->autohide_reference_time = now;    
 
 				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
 				ctx->artist_scroll_px = 0.0;
@@ -847,10 +920,6 @@ static void poll_loop(spotify_source *ctx)
 						ctx->transition_start = now;
 						ctx->transition_active = true;
 
-						// Show the starting frame immediately -- the tick
-						// loop below takes over and blends toward the new
-						// frame from here, rather than the display jumping
-						// straight to the fully composed new frame.
 						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
 						ctx->pending_pixels = ctx->transition_from_pixels;
 						ctx->pending_w = fromW;
@@ -858,6 +927,9 @@ static void poll_loop(spotify_source *ctx)
 						ctx->new_bitmap_ready = true;
 					}
 				}
+			} else if (ArtBytesDiffer(ctx->last_art_bytes, info.ImageData, info.ImageLength)) {
+				UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
@@ -885,6 +957,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->playback_position_ticks = 0;
 				ctx->max_displayed_position_ticks = 0;
 				ctx->have_track = false;
+				ctx->autohide_reference_time = std::chrono::steady_clock::now();
 				gap_active = false;
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
@@ -913,12 +986,15 @@ static void poll_loop(spotify_source *ctx)
 			if (ctx->have_track || s.show_plugin_attribution) {
 				auto now = std::chrono::steady_clock::now();
 
+				bool autohideChanged = UpdateAutohideAlpha(ctx, s, now);
+
 				if (ctx->transition_active) {
 					double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->transition_start).count();
 					double t = elapsedMs / (double)TRACK_CHANGE_TRANSITION_MS;
 
 					std::vector<uint8_t> blended;
 					BlendPixelBuffers(ctx->transition_from_pixels, ctx->transition_to_pixels, blended, t);
+					ScaleAlphaChannel(blended, ctx->autohide_alpha);
 
 					{
 						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
@@ -934,7 +1010,7 @@ static void poll_loop(spotify_source *ctx)
 						ctx->transition_to_pixels.clear();
 					}
 				} else {
-					bool needCompose = false;
+					bool needCompose = autohideChanged;
 
 					if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
 						if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
@@ -1106,6 +1182,10 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->track_change_animation_enabled = obs_data_get_bool(settings, "track_change_animation_enabled");
 
+	ctx->autohide_enabled = obs_data_get_bool(settings, "autohide_enabled");
+	ctx->autohide_after_s = (int)obs_data_get_int(settings, "autohide_after_s");
+	ctx->autohide_after_s = std::clamp(ctx->autohide_after_s, 0, 3600);
+
 	obs_data_t *title_font_obj = obs_data_get_obj(settings, "title_font");
 	if (title_font_obj) {
 		const char *face = obs_data_get_string(title_font_obj, "face");
@@ -1183,6 +1263,9 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "track_change_animation_enabled", true);
 
+	obs_data_set_default_bool(settings, "autohide_enabled", false);
+	obs_data_set_default_int(settings, "autohide_after_s", DEFAULT_AUTOHIDE_AFTER_S);
+
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(title_font_obj, "style", "Bold");
@@ -1198,6 +1281,14 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_release(artist_font_obj);
 }
 
+static bool autohide_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "autohide_enabled");
+	obs_property_t *after_prop = obs_properties_get(props, "autohide_after_s");
+	obs_property_set_enabled(after_prop, enabled);
+	return true;
+}
+
 static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
@@ -1205,6 +1296,9 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
 	obs_properties_add_bool(props, "track_change_animation_enabled", obs_module_text("TrackChangeAnimation"));
+	obs_property_t *autohide_prop = obs_properties_add_bool(props, "autohide_enabled", obs_module_text("AutohideEnabled"));
+	obs_properties_add_int(props, "autohide_after_s", obs_module_text("AutohideAfterSeconds"), 1, 3600, 1);
+	obs_property_set_modified_callback(autohide_prop, autohide_enabled_modified);
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
@@ -1242,6 +1336,11 @@ static void *spotify_source_create(obs_data_t *settings, obs_source_t *source)
 	auto *ctx = new spotify_source();
 	ctx->source = source;
 	apply_settings(ctx, settings);
+
+	auto now = std::chrono::steady_clock::now();
+	ctx->autohide_reference_time = now;
+	ctx->last_autohide_tick = now;
+
 	ctx->running = true;
 	ctx->poll_thread = std::thread(poll_loop, ctx);
 	return ctx;
