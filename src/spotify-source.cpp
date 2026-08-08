@@ -77,8 +77,11 @@ constexpr int VU_GAP_BEFORE_TEXT = 10;
 
 // Progress bar geometry
 constexpr int DEFAULT_PROGRESS_BAR_HEIGHT = 6;
-constexpr int DEFAULT_PROGRESS_BAR_GAP = 6;      // gap between artist text and the bar
-constexpr int PROGRESS_UPDATE_MS = 1000; // how often the bar redraws while a track is loaded
+constexpr int DEFAULT_PROGRESS_BAR_GAP = 6; // gap between artist text and the bar
+constexpr int PROGRESS_UPDATE_MS = 1000;    // how often the bar redraws while a track is loaded
+
+// Track-change transition
+constexpr int TRACK_CHANGE_TRANSITION_MS = 300;
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -192,10 +195,6 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	g.SetClip(&savedClip);
 }
 
-// Caches a built Font alongside the settings it was built from, so repeated
-// calls with unchanged font settings (the common case -- font settings
-// change far less often than compose_bitmap runs) skip the FontFamily
-// lookup and Font construction entirely.
 struct CachedFont {
 	std::unique_ptr<Font> font;
 	std::string face;
@@ -221,6 +220,18 @@ Font *EnsureFont(CachedFont &cache, const std::string &face, const std::string &
 		cache.flags = flags;
 	}
 	return cache.font.get();
+}
+
+void BlendPixelBuffers(const std::vector<uint8_t> &from, const std::vector<uint8_t> &to, std::vector<uint8_t> &out, double t)
+{
+	size_t n = std::min(from.size(), to.size());
+	out.resize(n);
+	int ti = (int)std::lround(std::clamp(t, 0.0, 1.0) * 255.0);
+	for (size_t i = 0; i < n; i++) {
+		int a = from[i];
+		int b = to[i];
+		out[i] = (uint8_t)(a + ((b - a) * ti) / 255);
+	}
 }
 
 } // namespace
@@ -268,6 +279,7 @@ struct spotify_source {
 	bool show_progress_bar = true;
 	long long progress_fill_color = 0xFFFFFFFF; // white
 	long long progress_bg_color = 0xFF5A5A5A;   // grey (packed R|G<<8|B<<16|A<<24)
+	bool track_change_animation_enabled = true;
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -305,20 +317,10 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
 
-	// Playback position tracking for the progress bar. The bridge only
-	// reports position once per poll (~1s), so we interpolate between
-	// polls using how much wall-clock time has passed since the last
-	// sample, rather than only updating the bar in visible 1s jumps.
-	int64_t song_duration_ticks = 0;     // .NET TimeSpan ticks (100ns each)
-	int64_t playback_position_ticks = 0; // position as of position_sample_time
+	int64_t song_duration_ticks = 0; // .NET TimeSpan ticks (100ns each)
+	int64_t playback_position_ticks = 0;
 	std::chrono::steady_clock::time_point position_sample_time{};
 	std::chrono::steady_clock::time_point last_progress_tick{};
-	// Highest position value actually displayed so far for the current
-	// track. A fresh sample can occasionally read a touch behind where
-	// we'd already extrapolated to (ordinary timing drift over the ~5s
-	// gap between real SMTC updates) -- rather than ever visibly stepping
-	// backward, we hold at this high point until the real value catches
-	// back up. Reset to 0 whenever the track changes.
 	int64_t max_displayed_position_ticks = 0;
 
 	std::unique_ptr<Image> goat_image;
@@ -330,6 +332,12 @@ struct spotify_source {
 
 	CachedFont title_font_cache;
 	CachedFont artist_font_cache;
+
+	bool transition_active = false;
+	std::vector<uint8_t> transition_from_pixels;
+	std::vector<uint8_t> transition_to_pixels;
+	uint32_t transition_w = 0, transition_h = 0;
+	std::chrono::steady_clock::time_point transition_start{};
 };
 
 struct AppearanceSettings {
@@ -369,6 +377,7 @@ struct AppearanceSettings {
 	bool show_progress_bar;
 	long long progress_fill_color;
 	long long progress_bg_color;
+	bool track_change_animation_enabled;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -418,12 +427,6 @@ static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettin
 	}
 }
 
-// Draws the two-layer progress bar: a full-width background "track" (always
-// drawn when enabled, even at 0% or with unknown duration, so the reserved
-// layout space never just looks like an empty gap) plus a growing fill on
-// top. Position is interpolated using how much wall-clock time has passed
-// since the last bridge poll, so the fill advances smoothly rather than
-// only jumping once a second.
 static void DrawProgressBar(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &barRect)
 {
 	if (!s.show_progress_bar || barRect.Width <= 0 || barRect.Height <= 0)
@@ -437,11 +440,7 @@ static void DrawProgressBar(Graphics &g, spotify_source *ctx, const AppearanceSe
 			elapsedTicks += (int64_t)(elapsedSeconds * 1.0e7); // 1 tick = 100ns
 		}
 
-		// Never let the displayed position move backward -- if a fresh
-		// sample happens to read a touch behind where we'd already
-		// extrapolated to, just hold at the previous high point instead
-		// of visibly snapping back; the real value will catch up on its
-		// own within a poll or two.
+		// Never let the displayed position move backward
 		if (elapsedTicks < ctx->max_displayed_position_ticks)
 			elapsedTicks = ctx->max_displayed_position_ticks;
 		else
@@ -489,13 +488,6 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
-// Decodes image_data (raw PNG/JPEG bytes from the bridge) exactly once and
-// caches the result on ctx. Called only when the track actually changes
-// (see poll_loop) -- compose_bitmap just draws whatever's cached here
-// without ever touching the raw bytes or re-decoding, since image decoding
-// is the single most expensive thing GDI+ does in this whole pipeline and
-// there's no reason to pay that cost on every scroll/VU tick when the art
-// itself hasn't changed.
 static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int image_len)
 {
 	ctx->cached_art_image.reset();
@@ -731,45 +723,43 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings
-	{
-		ctx->title_color,
-		ctx->artist_color,
-		ctx->bg_color,
-		ctx->bg_opacity,
-		ctx->background_corner_radius,
-		ctx->album_art_corner_radius,
-		ctx->title_font_face,
-		ctx->title_font_style,
-		ctx->title_font_size,
-		ctx->title_font_flags,
-		ctx->artist_font_face,
-		ctx->artist_font_style,
-		ctx->artist_font_size,
-		ctx->artist_font_flags,
-		ctx->card_w,
-		ctx->card_h,
-		ctx->text_offset_y,
-		ctx->progress_bar_gap,
-		ctx->progress_bar_height,
-		ctx->scroll_speed_ms,
-		ctx->vu_meter_enabled,
-		ctx->vu_color,
-		ctx->vu_update_ms,
-		ctx->vu_randomness,
-		ctx->vu_width,
-		ctx->vu_height,
-		ctx->vu_bar_count,
-		ctx->vu_horizontal,
-		ctx->vertical_layout,
-		ctx->show_album_name,
-		ctx->show_goat_placeholder,
-		ctx->show_plugin_attribution,
-		ctx->hide_album_art,
-		ctx->show_progress_bar,
-		ctx->progress_fill_color,
-		ctx->progress_bg_color
-	};
+	return AppearanceSettings{ctx->title_color,
+				  ctx->artist_color,
+				  ctx->bg_color,
+				  ctx->bg_opacity,
+				  ctx->background_corner_radius,
+				  ctx->album_art_corner_radius,
+				  ctx->title_font_face,
+				  ctx->title_font_style,
+				  ctx->title_font_size,
+				  ctx->title_font_flags,
+				  ctx->artist_font_face,
+				  ctx->artist_font_style,
+				  ctx->artist_font_size,
+				  ctx->artist_font_flags,
+				  ctx->card_w,
+				  ctx->card_h,
+				  ctx->text_offset_y,
+				  ctx->progress_bar_gap,
+				  ctx->progress_bar_height,
+				  ctx->scroll_speed_ms,
+				  ctx->vu_meter_enabled,
+				  ctx->vu_color,
+				  ctx->vu_update_ms,
+				  ctx->vu_randomness,
+				  ctx->vu_width,
+				  ctx->vu_height,
+				  ctx->vu_bar_count,
+				  ctx->vu_horizontal,
+				  ctx->vertical_layout,
+				  ctx->show_album_name,
+				  ctx->show_goat_placeholder,
+				  ctx->show_plugin_attribution,
+				  ctx->hide_album_art,
+				  ctx->show_progress_bar,
+				  ctx->progress_fill_color,
+				  ctx->progress_bg_color,
+				  ctx->track_change_animation_enabled};
 }
 
 static void poll_loop(spotify_source *ctx)
@@ -789,8 +779,7 @@ static void poll_loop(spotify_source *ctx)
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
 
-		if (ctx->show_album_name)
-		{
+		if (ctx->show_album_name) {
 			std::string albumName = " - " + std::string(info.AlbumName);
 			artist.append(albumName);
 		}
@@ -802,13 +791,6 @@ static void poll_loop(spotify_source *ctx)
 			ctx->is_playing = info.IsPlaying;
 			auto now = std::chrono::steady_clock::now();
 
-			// Windows' media session (SMTC) only refreshes position roughly
-			// every 5s even though we poll every 1s -- re-stamping the
-			// sample time on every poll, even when the reported value
-			// hasn't actually moved, causes the interpolated bar to snap
-			// backward to the stale value each time we resample it. Only
-			// take a fresh sample when the value genuinely changed, or the
-			// track itself changed (which always needs a fresh baseline).
 			bool positionChanged = (info.CurrentPlaybackTimeTicks != ctx->playback_position_ticks) || (info.SongDurationTicks != ctx->song_duration_ticks);
 			if (track_changed || positionChanged) {
 				ctx->song_duration_ticks = info.SongDurationTicks;
@@ -834,7 +816,48 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_pause_start = now;
 				ctx->last_scroll_tick = std::chrono::steady_clock::now();
 
-				compose_bitmap(ctx, title, artist, snapshot_settings(ctx));
+				AppearanceSettings snap = snapshot_settings(ctx);
+
+				std::vector<uint8_t> fromPixels;
+				uint32_t fromW = 0, fromH = 0;
+				{
+					std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+					fromPixels = ctx->pending_pixels;
+					fromW = ctx->pending_w;
+					fromH = ctx->pending_h;
+				}
+
+				compose_bitmap(ctx, title, artist, snap);
+
+				if (snap.track_change_animation_enabled && !fromPixels.empty()) {
+					std::vector<uint8_t> toPixels;
+					uint32_t toW = 0, toH = 0;
+					{
+						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+						toPixels = ctx->pending_pixels;
+						toW = ctx->pending_w;
+						toH = ctx->pending_h;
+					}
+
+					if (fromW == toW && fromH == toH) {
+						ctx->transition_from_pixels = std::move(fromPixels);
+						ctx->transition_to_pixels = std::move(toPixels);
+						ctx->transition_w = toW;
+						ctx->transition_h = toH;
+						ctx->transition_start = now;
+						ctx->transition_active = true;
+
+						// Show the starting frame immediately -- the tick
+						// loop below takes over and blends toward the new
+						// frame from here, rather than the display jumping
+						// straight to the fully composed new frame.
+						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+						ctx->pending_pixels = ctx->transition_from_pixels;
+						ctx->pending_w = fromW;
+						ctx->pending_h = fromH;
+						ctx->new_bitmap_ready = true;
+					}
+				}
 			} else if (ctx->settings_dirty) {
 				ctx->title_scroll_px = 0.0;
 				ctx->artist_scroll_px = 0.0;
@@ -881,16 +904,6 @@ static void poll_loop(spotify_source *ctx)
 		if (has && info.ImageData != nullptr)
 			FreeImageBuffer(info.ImageData);
 
-		// Settings only change via apply_settings() (which sets
-		// settings_dirty), and the check below still runs every 50ms on a
-		// plain atomic bool -- the moment a setting changes, this loop
-		// still exits within 50ms and the outer loop immediately
-		// recomposes with a fresh snapshot_settings() call. So it's safe
-		// to snapshot once per ~1s outer pass here rather than on every
-		// 50ms tick: this only skips the redundant mutex-lock-and-copy
-		// during the (common) stretches where nothing has actually
-		// changed, without adding any delay to how quickly a real
-		// settings change gets picked up.
 		AppearanceSettings s = snapshot_settings(ctx);
 
 		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
@@ -899,98 +912,115 @@ static void poll_loop(spotify_source *ctx)
 
 			if (ctx->have_track || s.show_plugin_attribution) {
 				auto now = std::chrono::steady_clock::now();
-				bool needCompose = false;
 
-				if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
-					if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
-						ctx->last_scroll_tick = now;
+				if (ctx->transition_active) {
+					double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->transition_start).count();
+					double t = elapsedMs / (double)TRACK_CHANGE_TRANSITION_MS;
 
-						if (ctx->title_needs_scroll) {
-							if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
-								if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
-									if (ctx->title_scroll_paused_at_end) {
-										ctx->title_scroll_px = 0.0;
-										ctx->title_scroll_paused_at_end = false;
-										ctx->title_scroll_paused_at_start = true;
+					std::vector<uint8_t> blended;
+					BlendPixelBuffers(ctx->transition_from_pixels, ctx->transition_to_pixels, blended, t);
+
+					{
+						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+						ctx->pending_pixels = std::move(blended);
+						ctx->pending_w = ctx->transition_w;
+						ctx->pending_h = ctx->transition_h;
+					}
+					ctx->new_bitmap_ready = true;
+
+					if (t >= 1.0) {
+						ctx->transition_active = false;
+						ctx->transition_from_pixels.clear();
+						ctx->transition_to_pixels.clear();
+					}
+				} else {
+					bool needCompose = false;
+
+					if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
+						if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
+							ctx->last_scroll_tick = now;
+
+							if (ctx->title_needs_scroll) {
+								if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
+									if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
+										if (ctx->title_scroll_paused_at_end) {
+											ctx->title_scroll_px = 0.0;
+											ctx->title_scroll_paused_at_end = false;
+											ctx->title_scroll_paused_at_start = true;
+											ctx->title_pause_start = now;
+											needCompose = true;
+										} else {
+											ctx->title_scroll_paused_at_start = false;
+											needCompose = true;
+										}
+									}
+								} else {
+									ctx->title_scroll_px += ctx->title_avg_char_px;
+									if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
+										ctx->title_scroll_px = ctx->title_scroll_max_px;
+										ctx->title_scroll_paused_at_end = true;
 										ctx->title_pause_start = now;
-										needCompose = true;
-									} else {
-										ctx->title_scroll_paused_at_start = false;
-										needCompose = true;
 									}
+									needCompose = true;
 								}
-							} else {
-								ctx->title_scroll_px += ctx->title_avg_char_px;
-								if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
-									ctx->title_scroll_px = ctx->title_scroll_max_px;
-									ctx->title_scroll_paused_at_end = true;
-									ctx->title_pause_start = now;
-								}
-								needCompose = true;
 							}
-						}
 
-						if (ctx->artist_needs_scroll) {
-							if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
-								if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
-									if (ctx->artist_scroll_paused_at_end) {
-										ctx->artist_scroll_px = 0.0;
-										ctx->artist_scroll_paused_at_end = false;
-										ctx->artist_scroll_paused_at_start = true;
+							if (ctx->artist_needs_scroll) {
+								if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
+									if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
+										if (ctx->artist_scroll_paused_at_end) {
+											ctx->artist_scroll_px = 0.0;
+											ctx->artist_scroll_paused_at_end = false;
+											ctx->artist_scroll_paused_at_start = true;
+											ctx->artist_pause_start = now;
+											needCompose = true;
+										} else {
+											ctx->artist_scroll_paused_at_start = false;
+											needCompose = true;
+										}
+									}
+								} else {
+									ctx->artist_scroll_px += ctx->artist_avg_char_px;
+									if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) {
+										ctx->artist_scroll_px = ctx->artist_scroll_max_px;
+										ctx->artist_scroll_paused_at_end = true;
 										ctx->artist_pause_start = now;
-										needCompose = true;
-									} else {
-										ctx->artist_scroll_paused_at_start = false;
-										needCompose = true;
 									}
+									needCompose = true;
 								}
-							} else {
-								ctx->artist_scroll_px += ctx->artist_avg_char_px;
-								if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) {
-									ctx->artist_scroll_px = ctx->artist_scroll_max_px;
-									ctx->artist_scroll_paused_at_end = true;
-									ctx->artist_pause_start = now;
-								}
-								needCompose = true;
 							}
 						}
 					}
-				}
 
-				if (s.vu_meter_enabled && now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
-					ctx->last_vu_tick = now;
-					int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
-					if (ctx->is_playing) {
-						std::uniform_real_distribution<double> dist(0.0, 1.0);
+					if (s.vu_meter_enabled && now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
+						ctx->last_vu_tick = now;
+						int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
+						if (ctx->is_playing) {
+							std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-						double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
-						for (int i = 0; i < barCount; i++) {
-							double target = dist(ctx->vu_rng);
-							ctx->vu_bar_frac[i] += (target - ctx->vu_bar_frac[i]) * pull;
+							double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
+							for (int i = 0; i < barCount; i++) {
+								double target = dist(ctx->vu_rng);
+								ctx->vu_bar_frac[i] += (target - ctx->vu_bar_frac[i]) * pull;
+							}
+							ctx->vu_was_playing = true;
+							needCompose = true;
+						} else if (ctx->vu_was_playing) {
+							for (int i = 0; i < barCount; i++)
+								ctx->vu_bar_frac[i] = 0.0;
+							ctx->vu_was_playing = false;
+							needCompose = true;
 						}
-						ctx->vu_was_playing = true;
-						needCompose = true;
-					} else if (ctx->vu_was_playing) {
-						for (int i = 0; i < barCount; i++)
-							ctx->vu_bar_frac[i] = 0.0;
-						ctx->vu_was_playing = false;
+					}
+
+					if (s.show_progress_bar && ctx->have_track && now - ctx->last_progress_tick >= std::chrono::milliseconds(PROGRESS_UPDATE_MS)) {
+						ctx->last_progress_tick = now;
 						needCompose = true;
 					}
-				}
 
-				// Progress bar redraw tick. Fires whenever a track is
-				// loaded, not just while playing -- this also catches a
-				// seek made while paused, since the outer poll loop only
-				// recomposes on track_changed/settings_dirty and would
-				// otherwise leave a stale bar position on screen for up
-				// to a second.
-				if (s.show_progress_bar && ctx->have_track && now - ctx->last_progress_tick >= std::chrono::milliseconds(PROGRESS_UPDATE_MS)) {
-					ctx->last_progress_tick = now;
-					needCompose = true;
-				}
-
-				if (needCompose) {
-					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
+					if (needCompose) {
+						compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
+					}
 				}
 			}
 
@@ -1024,7 +1054,7 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->background_corner_radius = (int)obs_data_get_int(settings, "background_corner_radius");
 	ctx->background_corner_radius = std::clamp(ctx->background_corner_radius, 0, 100);
 
-	ctx->album_art_corner_radius= (int)obs_data_get_int(settings, "album_art_corner_radius");
+	ctx->album_art_corner_radius = (int)obs_data_get_int(settings, "album_art_corner_radius");
 	ctx->album_art_corner_radius = std::clamp(ctx->album_art_corner_radius, 0, 100);
 
 	ctx->card_w = (int)obs_data_get_int(settings, "card_width");
@@ -1073,6 +1103,8 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->show_progress_bar = obs_data_get_bool(settings, "show_progress_bar");
 	ctx->progress_fill_color = obs_data_get_int(settings, "progress_fill_color");
 	ctx->progress_bg_color = obs_data_get_int(settings, "progress_bg_color");
+
+	ctx->track_change_animation_enabled = obs_data_get_bool(settings, "track_change_animation_enabled");
 
 	obs_data_t *title_font_obj = obs_data_get_obj(settings, "title_font");
 	if (title_font_obj) {
@@ -1149,6 +1181,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "progress_fill_color", DEFAULT_COLOR_WHITE);
 	obs_data_set_default_int(settings, "progress_bg_color", DEFAULT_COLOR_DARK_GREY);
 
+	obs_data_set_default_bool(settings, "track_change_animation_enabled", true);
+
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(title_font_obj, "style", "Bold");
@@ -1170,6 +1204,7 @@ static obs_properties_t *spotify_source_properties(void *)
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
+	obs_properties_add_bool(props, "track_change_animation_enabled", obs_module_text("TrackChangeAnimation"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
@@ -1182,7 +1217,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
 	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
-	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);	
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);
 	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
 	obs_properties_add_color_alpha(props, "progress_fill_color", obs_module_text("ProgressFillColor"));
 	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
