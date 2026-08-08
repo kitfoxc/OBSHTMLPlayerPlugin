@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <obs-module.h>
 #include <util/dstr.h>
+#include <util/platform.h>
 #include <util/bmem.h>
 
 #define NOMINMAX
@@ -71,20 +72,16 @@ constexpr int DEFAULT_COLOR_BLACK = 0x00000000;
 constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
 constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
 
-// VU meter geometry
 constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
 constexpr int VU_GAP_BEFORE_TEXT = 10;
 
-// Progress bar geometry
 constexpr int DEFAULT_PROGRESS_BAR_HEIGHT = 6;
 constexpr int DEFAULT_PROGRESS_BAR_GAP = 6; // gap between artist text and the bar
 constexpr int PROGRESS_UPDATE_MS = 1000;    // how often the bar redraws while a track is loaded
 
-// Track-change transition
 constexpr int TRACK_CHANGE_TRANSITION_MS = 300;
 
-// Autohide fade (both the fade-out once the delay elapses, and the fade-in on track change)
 constexpr int AUTOHIDE_FADE_MS = 1000;
 constexpr int DEFAULT_AUTOHIDE_AFTER_S = 5;
 
@@ -239,7 +236,6 @@ void BlendPixelBuffers(const std::vector<uint8_t> &from, const std::vector<uint8
 	}
 }
 
-
 void ScaleAlphaChannel(std::vector<uint8_t> &pixels, float alpha)
 {
 	if (alpha >= 0.999f)
@@ -262,6 +258,8 @@ struct spotify_source {
 	long long artist_color = DEFAULT_COLOR_WHITE;
 	long long bg_color = 0;
 	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
+	bool use_bg_image = false;
+	std::string bg_image_path;
 	int background_corner_radius = DEFAULT_BACKGROUND_CORNER_RADIUS;
 	int album_art_corner_radius = DEFAULT_ALBUM_ART_CORNER_RADIUS;
 	std::string title_font_face = "Segoe UI";
@@ -344,6 +342,9 @@ struct spotify_source {
 	std::unique_ptr<Image> goat_image;
 	bool goat_image_load_attempted = false;
 
+	std::unique_ptr<Image> cached_bg_image;
+	std::string cached_bg_image_path;
+
 	std::unique_ptr<Bitmap> cached_bitmap;
 	int cached_bitmap_w = 0;
 	int cached_bitmap_h = 0;
@@ -357,7 +358,6 @@ struct spotify_source {
 	uint32_t transition_w = 0, transition_h = 0;
 	std::chrono::steady_clock::time_point transition_start{};
 
-
 	float autohide_alpha = 1.0f;
 	std::chrono::steady_clock::time_point autohide_reference_time{};
 	std::chrono::steady_clock::time_point last_autohide_tick{};
@@ -368,6 +368,8 @@ struct AppearanceSettings {
 	long long artist_color;
 	long long bg_color;
 	int bg_opacity;
+	bool use_bg_image;
+	std::string bg_image_path;
 	int background_corner_radius;
 	int album_art_corner_radius;
 	std::string title_font_face;
@@ -513,6 +515,30 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
+static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path)
+{
+	if (path.empty()) {
+		ctx->cached_bg_image.reset();
+		ctx->cached_bg_image_path.clear();
+		return nullptr;
+	}
+
+	if (ctx->cached_bg_image && ctx->cached_bg_image_path == path)
+		return ctx->cached_bg_image.get();
+
+	std::wstring wpath = Utf8ToWide(path);
+	auto img = std::make_unique<Image>(wpath.c_str());
+	if (img->GetLastStatus() != Ok) {
+		ctx->cached_bg_image.reset();
+		ctx->cached_bg_image_path.clear();
+		return nullptr;
+	}
+
+	ctx->cached_bg_image = std::move(img);
+	ctx->cached_bg_image_path = path;
+	return ctx->cached_bg_image.get();
+}
+
 static bool ArtBytesDiffer(const std::vector<uint8_t> &cached, const uint8_t *image_data, int image_len)
 {
 	if (image_data == nullptr || image_len <= 0)
@@ -543,7 +569,7 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	}
 }
 
-static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s)
+static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
 {
 	const int cardW = std::max(s.card_w, 50);
 	const int cardH = std::max(s.card_h, 30);
@@ -562,10 +588,42 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	g.Clear(Color(0, 0, 0, 0));
 
 	// card background
-	SolidBrush bgBrush(ObsColorToGdipWithAlpha(s.bg_color, s.bg_opacity));
 	GraphicsPath bgPath;
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), s.background_corner_radius);
-	g.FillPath(&bgBrush, &bgPath);
+
+	Image *bgImage = nullptr;
+	if (s.use_bg_image) {
+		if (!ctx->cached_bg_image || settings_changed)
+			bgImage = EnsureBackgroundImage(ctx, s.bg_image_path);
+		else
+			bgImage = ctx->cached_bg_image.get();
+	}
+	if (bgImage) {
+		Region savedBgClip;
+		g.GetClip(&savedBgClip);
+		g.SetClip(&bgPath);
+
+		UINT imgW = bgImage->GetWidth();
+		UINT imgH = bgImage->GetHeight();
+		REAL srcW = (REAL)std::min<UINT>(imgW, (UINT)cardW);
+		REAL srcH = (REAL)std::min<UINT>(imgH, (UINT)cardH);
+
+		ImageAttributes bgAttr;
+		if (s.bg_opacity < 100) {
+			REAL a = std::clamp(s.bg_opacity, 0, 100) / 100.0f;
+			Gdiplus::ColorMatrix cm = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, a, 0, 0, 0, 0, 0, 1};
+			bgAttr.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+		}
+
+		// Draw the top-left crop of the source image 1:1 (no scaling) into the card
+		RectF bgDestRect(0.0f, 0.0f, srcW, srcH);
+		g.DrawImage(bgImage, bgDestRect, 0.0f, 0.0f, srcW, srcH, UnitPixel, &bgAttr);
+
+		g.SetClip(&savedBgClip);
+	} else {
+		SolidBrush bgBrush(ObsColorToGdipWithAlpha(s.bg_color, s.bg_opacity));
+		g.FillPath(&bgBrush, &bgPath);
+	}
 
 	int titleSize = s.title_font_size > 0 ? s.title_font_size : DEFAULT_TITLE_FONT_SIZE;
 	int artistSize = s.artist_font_size > 0 ? s.artist_font_size : DEFAULT_ARTIST_FONT_SIZE;
@@ -767,6 +825,8 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->artist_color,
 				  ctx->bg_color,
 				  ctx->bg_opacity,
+				  ctx->use_bg_image,
+				  ctx->bg_image_path,
 				  ctx->background_corner_radius,
 				  ctx->album_art_corner_radius,
 				  ctx->title_font_face,
@@ -803,7 +863,6 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 				  ctx->autohide_enabled,
 				  ctx->autohide_after_s};
 }
-
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
 {
@@ -876,8 +935,8 @@ static void poll_loop(spotify_source *ctx)
 				ctx->last_song = title;
 				ctx->last_artist = artist;
 				ctx->have_track = true;
-				ctx->max_displayed_position_ticks = 0; 
-				ctx->autohide_reference_time = now;    
+				ctx->max_displayed_position_ticks = 0;
+				ctx->autohide_reference_time = now;
 
 				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
 				ctx->artist_scroll_px = 0.0;
@@ -939,7 +998,7 @@ static void poll_loop(spotify_source *ctx)
 				ctx->artist_scroll_paused_at_start = true;
 				ctx->title_pause_start = now;
 				ctx->artist_pause_start = now;
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
 			}
 		} else if (ctx->have_track) {
 			ctx->is_playing = false;
@@ -970,7 +1029,7 @@ static void poll_loop(spotify_source *ctx)
 				compose_bitmap(ctx, "", "", snapshot_settings(ctx));
 			}
 		} else if (ctx->settings_dirty) {
-			compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
+			compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
 		}
 		ctx->settings_dirty = false;
 
@@ -1117,6 +1176,142 @@ static const char *spotify_source_get_name(void *)
 	return obs_module_text("NowPlayingWidget");
 }
 
+// ---------------------------------------------------------------------
+// Settings export / import
+//
+// These lists are the single source of truth for which settings keys get
+// backed up. Add a key here whenever a new setting is introduced -- any
+// key NOT listed here is simply never touched by export/import. On import,
+// a key that isn't present in the file being imported (e.g. it came from
+// an older plugin version) is left untouched, so partial/older backups
+// degrade gracefully instead of clobbering the rest of the config.
+// ---------------------------------------------------------------------
+
+static const char *const kSettingsIntKeys[] = {
+	"title_color",
+	"artist_color",
+	"bg_color",
+	"bg_opacity",
+	"background_corner_radius",
+	"album_art_corner_radius",
+	"card_width",
+	"card_height",
+	"text_offset_y",
+	"progress_bar_gap",
+	"progress_bar_height",
+	"scroll_speed_ms",
+	"vu_color",
+	"vu_update_ms",
+	"vu_randomness",
+	"vu_width",
+	"vu_height",
+	"vu_bar_count",
+	"progress_fill_color",
+	"progress_bg_color",
+	"autohide_after_s",
+};
+
+static const char *const kSettingsBoolKeys[] = {
+	"use_bg_image",          "vu_meter_enabled",        "vu_horizontal",  "vertical_layout",   "show_album_name",
+	"show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled",
+	"autohide_enabled",
+};
+
+static const char *const kSettingsStringKeys[] = {
+	"bg_image_path",
+};
+
+static const char *const kSettingsObjKeys[] = {
+	"title_font",
+	"artist_font",
+};
+
+static void export_known_settings(obs_data_t *settings, obs_data_t *out)
+{
+	for (const char *key : kSettingsIntKeys)
+		obs_data_set_int(out, key, obs_data_get_int(settings, key));
+	for (const char *key : kSettingsBoolKeys)
+		obs_data_set_bool(out, key, obs_data_get_bool(settings, key));
+	for (const char *key : kSettingsStringKeys)
+		obs_data_set_string(out, key, obs_data_get_string(settings, key));
+	for (const char *key : kSettingsObjKeys) {
+		obs_data_t *obj = obs_data_get_obj(settings, key);
+		if (obj) {
+			obs_data_set_obj(out, key, obj);
+			obs_data_release(obj);
+		}
+	}
+}
+
+
+static void import_known_settings(obs_data_t *imported, obs_data_t *settings)
+{
+	for (const char *key : kSettingsIntKeys)
+		if (obs_data_has_user_value(imported, key))
+			obs_data_set_int(settings, key, obs_data_get_int(imported, key));
+	for (const char *key : kSettingsBoolKeys)
+		if (obs_data_has_user_value(imported, key))
+			obs_data_set_bool(settings, key, obs_data_get_bool(imported, key));
+	for (const char *key : kSettingsStringKeys)
+		if (obs_data_has_user_value(imported, key))
+			obs_data_set_string(settings, key, obs_data_get_string(imported, key));
+	for (const char *key : kSettingsObjKeys) {
+		if (obs_data_has_user_value(imported, key)) {
+			obs_data_t *obj = obs_data_get_obj(imported, key);
+			if (obj) {
+				obs_data_set_obj(settings, key, obj);
+				obs_data_release(obj);
+			}
+		}
+	}
+}
+
+static bool export_settings_modified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	const char *path = obs_data_get_string(settings, "export_settings_path");
+	if (path && path[0]) {
+		struct dstr fixed_path = {0};
+		dstr_copy(&fixed_path, path);
+
+		const char *ext = os_get_path_extension(fixed_path.array);
+		if (!ext || astrcmpi(ext, ".json") != 0) {
+			if (ext && *ext) {
+				dstr_resize(&fixed_path, ext - fixed_path.array);
+			}
+			dstr_cat(&fixed_path, ".json");
+		}
+
+		obs_data_t *out = obs_data_create();
+		export_known_settings(settings, out);
+		if (!obs_data_save_json_pretty_safe(out, fixed_path.array, "tmp", "bak")) {
+			blog(LOG_WARNING, "[spotify_now_playing] Failed to export settings to %s", fixed_path.array);
+		}
+		obs_data_release(out);
+
+		dstr_free(&fixed_path);
+
+		obs_data_set_string(settings, "export_settings_path", "");
+	}
+	return true;
+}
+
+static bool import_settings_modified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	const char *path = obs_data_get_string(settings, "import_settings_path");
+	if (path && path[0]) {
+		obs_data_t *imported = obs_data_create_from_json_file(path);
+		if (imported) {
+			import_known_settings(imported, settings);
+			obs_data_release(imported);
+		} else {
+			blog(LOG_WARNING, "[spotify_now_playing] Failed to import settings from %s", path);
+		}
+
+		obs_data_set_string(settings, "import_settings_path", "");
+	}
+	return true; // refresh all property widgets so imported values show up immediately
+}
+
 static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
@@ -1126,6 +1321,10 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->bg_opacity = (int)obs_data_get_int(settings, "bg_opacity");
 	ctx->bg_opacity = std::clamp(ctx->bg_opacity, 0, 100);
+
+	ctx->use_bg_image = obs_data_get_bool(settings, "use_bg_image");
+	const char *bg_image_path = obs_data_get_string(settings, "bg_image_path");
+	ctx->bg_image_path = bg_image_path ? bg_image_path : "";
 
 	ctx->background_corner_radius = (int)obs_data_get_int(settings, "background_corner_radius");
 	ctx->background_corner_radius = std::clamp(ctx->background_corner_radius, 0, 100);
@@ -1230,6 +1429,11 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
+	obs_data_set_default_string(settings, "export_settings_path", "");
+	obs_data_set_default_string(settings, "import_settings_path", "");
+
+	obs_data_set_default_bool(settings, "use_bg_image", false);
+	obs_data_set_default_string(settings, "bg_image_path", "");
 	obs_data_set_default_int(settings, "background_corner_radius", DEFAULT_BACKGROUND_CORNER_RADIUS);
 	obs_data_set_default_int(settings, "album_art_corner_radius", DEFAULT_ALBUM_ART_CORNER_RADIUS);
 
@@ -1289,9 +1493,24 @@ static bool autohide_enabled_modified(obs_properties_t *props, obs_property_t *,
 	return true;
 }
 
+static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "use_bg_image");
+	obs_property_t *path_prop = obs_properties_get(props, "bg_image_path");
+	obs_property_set_enabled(path_prop, enabled);
+	return true;
+}
+
 static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
+
+	obs_property_t *export_settings_prop =
+		obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
+	obs_property_set_modified_callback(export_settings_prop, export_settings_modified);
+
+	obs_property_t *import_settings_prop = obs_properties_add_path(props, "import_settings_path", obs_module_text("ImportSettings"), OBS_PATH_FILE, "JSON (*.json)", nullptr);
+	obs_property_set_modified_callback(import_settings_prop, import_settings_modified);
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
@@ -1304,6 +1523,9 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
+	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
+	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
+	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
 	obs_properties_add_int(props, "album_art_corner_radius", obs_module_text("AlbumArtCornerRadius"), 1, 100, 1);
 	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
