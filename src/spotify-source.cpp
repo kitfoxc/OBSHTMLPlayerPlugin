@@ -1497,20 +1497,15 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 {
 	bool enabled = obs_data_get_bool(settings, "use_bg_image");
 	obs_property_t *path_prop = obs_properties_get(props, "bg_image_path");
+	obs_property_t *bg_color_prop = obs_properties_get(props, "bg_color");
 	obs_property_set_enabled(path_prop, enabled);
+	obs_property_set_enabled(bg_color_prop, enabled);
 	return true;
 }
 
 static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
-
-	obs_property_t *export_settings_prop =
-		obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
-	obs_property_set_modified_callback(export_settings_prop, export_settings_modified);
-
-	obs_property_t *import_settings_prop = obs_properties_add_path(props, "import_settings_path", obs_module_text("ImportSettings"), OBS_PATH_FILE, "JSON (*.json)", nullptr);
-	obs_property_set_modified_callback(import_settings_prop, import_settings_modified);
 
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
@@ -1521,11 +1516,11 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
-	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
-	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
 	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
 	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
+	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
+	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);	
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
 	obs_properties_add_int(props, "album_art_corner_radius", obs_module_text("AlbumArtCornerRadius"), 1, 100, 1);
 	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
@@ -1549,6 +1544,12 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
 	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
+	
+	obs_property_t *export_settings_prop = obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
+	obs_property_set_modified_callback(export_settings_prop, export_settings_modified);
+
+	obs_property_t *import_settings_prop = obs_properties_add_path(props, "import_settings_path", obs_module_text("ImportSettings"), OBS_PATH_FILE, "JSON (*.json)", nullptr);
+	obs_property_set_modified_callback(import_settings_prop, import_settings_modified);
 
 	return props;
 }
