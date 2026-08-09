@@ -43,7 +43,13 @@ or like this:
 
 <img width="1041" height="248" alt="image" src="https://github.com/user-attachments/assets/65fccbd2-6f99-4340-82e8-cb5a73c62436" />
 
-You either do not have any songs playing, or you are not using windows 10 or 11, or you are using an incompatible source. If its the latter case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
+Then most likely Windows Defender has "blocked" the SpotifyReader.dll file. You can unblock this by going to , right clicking the `SpotifyReader.dll` file, clicking "Unblock", and then save. Then close OBS and reopen it, and the plugin should work.
+
+This is an example of what the "Unblock" option looks like:
+
+<img width="361" height="506" alt="image" src="https://github.com/user-attachments/assets/c5a79132-ae74-483f-a440-7d6f8f754401" />
+
+The other possibility is that you are using an unsupported music source. If this is the case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
 
 ### The Artist text is very small
 
