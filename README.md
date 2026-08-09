@@ -33,6 +33,19 @@ Only works on windows.
 
 # Troubleshooting
 
+### How do I use the image background?
+
+The "image background" option will crop your image to the size of the widgets card, starting at the top left. So for example if your image is 600x600, and your card is 300x300, you will get the top left 1/4 of your image as the background.
+
+To properly use the feature, you should resize your image to the same size as the card. So if your card is 300x300, your image should also be 300x300.
+
+The intent of this feature is to let people style their widget without having to have a million different options. So if you want to theme the widget to your stream, or if youre a vtuber and want to add your avatar to the card background or something like that, this is the perfect feature, but it really does require art specifically designed for it to work best.
+
+Example 380x100 card with 380x100 image background:
+
+<img width="456" height="134" alt="image" src="https://github.com/user-attachments/assets/e580d924-1498-4b38-b7d4-89cd265b691c" />
+
+
 ### The widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
 If the preview or the live source looks like this:
