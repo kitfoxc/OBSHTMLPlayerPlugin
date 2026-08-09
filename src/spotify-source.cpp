@@ -86,6 +86,8 @@ constexpr int TRACK_CHANGE_TRANSITION_MS = 300;
 constexpr int AUTOHIDE_FADE_MS = 1000;
 constexpr int DEFAULT_AUTOHIDE_AFTER_S = 5;
 
+constexpr int DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S = 10;
+
 ULONG_PTR g_gdiplusToken = 0;
 
 std::wstring Utf8ToWide(const std::string &utf8)
@@ -296,6 +298,7 @@ struct spotify_source {
 	bool track_change_animation_enabled = true;
 	bool autohide_enabled = false;
 	int autohide_after_s = DEFAULT_AUTOHIDE_AFTER_S;
+	bool autohide_when_not_playing = false;
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -362,6 +365,8 @@ struct spotify_source {
 	float autohide_alpha = 1.0f;
 	std::chrono::steady_clock::time_point autohide_reference_time{};
 	std::chrono::steady_clock::time_point last_autohide_tick{};
+
+	std::chrono::steady_clock::time_point last_playing_time{};
 };
 
 struct AppearanceSettings {
@@ -406,6 +411,7 @@ struct AppearanceSettings {
 	bool track_change_animation_enabled;
 	bool autohide_enabled;
 	int autohide_after_s;
+	bool autohide_when_not_playing;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -516,7 +522,6 @@ static Image *GetGoatImage(spotify_source *ctx)
 	return ctx->goat_image.get();
 }
 
-
 static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path)
 {
 	if (path.empty()) {
@@ -570,7 +575,7 @@ static Image *EnsureBackgroundImage(spotify_source *ctx, const std::string &path
 static bool ArtBytesDiffer(const std::vector<uint8_t> &cached, const uint8_t *image_data, int image_len)
 {
 	if (image_data == nullptr || image_len <= 0)
-		return !cached.empty(); 
+		return !cached.empty();
 	if (cached.size() != (size_t)image_len)
 		return true;
 	return memcmp(cached.data(), image_data, (size_t)image_len) != 0;
@@ -896,7 +901,8 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 		ctx->progress_bg_color, 
 		ctx->track_change_animation_enabled, 
 		ctx->autohide_enabled, 
-		ctx->autohide_after_s
+		ctx->autohide_after_s, 
+		ctx->autohide_when_not_playing
 	};
 }
 
@@ -908,6 +914,9 @@ static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s
 		dtMs = 50.0;
 
 	float target = 1.0f;
+
+	// "Autohide after track change": fades out a fixed, user-configurable delay after the
+	// source became active / the last track change, regardless of playback state.
 	if (s.autohide_enabled) {
 		if (obs_source_active(ctx->source)) {
 			double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->autohide_reference_time).count();
@@ -915,6 +924,15 @@ static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s
 			if (elapsedMs >= delayMs)
 				target = 0.0f;
 		}
+	}
+
+	// "Autohide when music is not playing": fades out a fixed 10s after playback was last
+	// observed to be playing -- covers both paused/stopped tracks and no track/session at all.
+	if (s.autohide_when_not_playing) {
+		double notPlayingElapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->last_playing_time).count();
+		double notPlayingDelayMs = (double)DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S * 1000.0;
+		if (notPlayingElapsedMs >= notPlayingDelayMs)
+			target = 0.0f;
 	}
 
 	if (ctx->autohide_alpha == target)
@@ -940,7 +958,7 @@ static void poll_loop(spotify_source *ctx)
 	std::chrono::steady_clock::time_point gap_start{};
 
 	while (ctx->running) {
-		if (!ctx->is_active) {			
+		if (!ctx->is_active) {
 			if (ctx->settings_dirty) {
 				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 				ctx->settings_dirty = false;
@@ -954,7 +972,7 @@ static void poll_loop(spotify_source *ctx)
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
-			
+
 		bool show_album_name;
 		{
 			std::lock_guard<std::mutex> lock(ctx->settings_mutex);
@@ -971,6 +989,11 @@ static void poll_loop(spotify_source *ctx)
 			gap_active = false;
 			ctx->is_playing = info.IsPlaying;
 			auto now = std::chrono::steady_clock::now();
+
+			
+			if (ctx->is_playing) {
+				ctx->last_playing_time = now;
+			}
 
 			bool positionChanged = (info.CurrentPlaybackTimeTicks != ctx->playback_position_ticks) || (info.SongDurationTicks != ctx->song_duration_ticks);
 			if (track_changed || positionChanged) {
@@ -1092,7 +1115,7 @@ static void poll_loop(spotify_source *ctx)
 			if (ctx->settings_dirty)
 				break; // let the outer loop apply the appearance change immediately
 
-			if (ctx->have_track || s.show_plugin_attribution) {
+			if (ctx->have_track || s.show_plugin_attribution || s.autohide_when_not_playing) {
 				auto now = std::chrono::steady_clock::now();
 
 				bool autohideChanged = UpdateAutohideAlpha(ctx, s, now);
@@ -1238,16 +1261,16 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius",
-	"card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", 
-	"vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", 
-	"progress_bg_color", "autohide_after_s",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", 
+	"album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", 
+	"progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", 
+	"vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", 
-	"show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", 
-	"show_progress_bar", "track_change_animation_enabled", "autohide_enabled",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", 
+	"show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", 
+	"track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing",
 };
 
 static const char *const kSettingsStringKeys[] = {
@@ -1341,7 +1364,7 @@ static bool import_settings_modified(obs_properties_t *, obs_property_t *, obs_d
 
 		obs_data_set_string(settings, "import_settings_path", "");
 	}
-	return true; 
+	return true;
 }
 
 static void apply_settings(spotify_source *ctx, obs_data_t *settings)
@@ -1416,6 +1439,8 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->autohide_enabled = obs_data_get_bool(settings, "autohide_enabled");
 	ctx->autohide_after_s = (int)obs_data_get_int(settings, "autohide_after_s");
 	ctx->autohide_after_s = std::clamp(ctx->autohide_after_s, 0, 3600);
+
+	ctx->autohide_when_not_playing = obs_data_get_bool(settings, "autohide_when_not_playing");
 
 	obs_data_t *title_font_obj = obs_data_get_obj(settings, "title_font");
 	if (title_font_obj) {
@@ -1502,6 +1527,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "autohide_enabled", false);
 	obs_data_set_default_int(settings, "autohide_after_s", DEFAULT_AUTOHIDE_AFTER_S);
 
+	obs_data_set_default_bool(settings, "autohide_when_not_playing", false);
+
 	obs_data_t *title_font_obj = obs_data_create();
 	obs_data_set_default_string(title_font_obj, "face", "Segoe UI");
 	obs_data_set_default_string(title_font_obj, "style", "Bold");
@@ -1542,6 +1569,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
 	obs_properties_add_bool(props, "track_change_animation_enabled", obs_module_text("TrackChangeAnimation"));
+	obs_properties_add_bool(props, "autohide_when_not_playing", obs_module_text("AutohideWhenNotPlaying"));
 	obs_property_t *autohide_prop = obs_properties_add_bool(props, "autohide_enabled", obs_module_text("AutohideEnabled"));
 	obs_properties_add_int(props, "autohide_after_s", obs_module_text("AutohideAfterSeconds"), 1, 3600, 1);
 	obs_property_set_modified_callback(autohide_prop, autohide_enabled_modified);
@@ -1595,6 +1623,7 @@ static void *spotify_source_create(obs_data_t *settings, obs_source_t *source)
 	auto now = std::chrono::steady_clock::now();
 	ctx->autohide_reference_time = now;
 	ctx->last_autohide_tick = now;
+	ctx->last_playing_time = now;
 
 	ctx->running = true;
 	ctx->poll_thread = std::thread(poll_loop, ctx);
