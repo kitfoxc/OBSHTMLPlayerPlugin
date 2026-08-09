@@ -252,6 +252,7 @@ struct spotify_source {
 
 	std::thread poll_thread;
 	std::atomic<bool> running{false};
+	std::atomic<bool> is_active{false}; // true only while this source's scene is part of the live/program output
 
 	std::mutex settings_mutex;
 	long long title_color = DEFAULT_COLOR_WHITE;
@@ -939,6 +940,15 @@ static void poll_loop(spotify_source *ctx)
 	std::chrono::steady_clock::time_point gap_start{};
 
 	while (ctx->running) {
+		if (!ctx->is_active) {			
+			if (ctx->settings_dirty) {
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
+				ctx->settings_dirty = false;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			continue;
+		}
+
 		NativeMediaInfo info{};
 		bool has = GetCurrentTrackNative(&info);
 
@@ -1609,6 +1619,22 @@ static void spotify_source_destroy(void *data)
 	delete ctx;
 }
 
+static void spotify_source_activate(void *data)
+{
+	// Called when this source becomes part of the live/program output (its scene went live,
+	// or a hidden scene item was shown). Resume the SMTC poll.
+	auto *ctx = (spotify_source *)data;
+	ctx->is_active = true;
+}
+
+static void spotify_source_deactivate(void *data)
+{
+	// Called when this source stops being part of the live/program output. Pause the SMTC
+	// poll until it's needed again.
+	auto *ctx = (spotify_source *)data;
+	ctx->is_active = false;
+}
+
 static uint32_t spotify_source_get_width(void *data)
 {
 	auto *ctx = (spotify_source *)data;
@@ -1695,6 +1721,8 @@ void spotify_source_register(void)
 	info.get_properties = spotify_source_properties;
 	info.get_defaults = spotify_source_defaults;
 	info.update = spotify_source_update;
+	info.activate = spotify_source_activate;
+	info.deactivate = spotify_source_deactivate;
 
 	obs_register_source(&info);
 }
