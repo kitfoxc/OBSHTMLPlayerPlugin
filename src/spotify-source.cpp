@@ -29,7 +29,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <shlwapi.h>
 #include <gdiplus.h>
 
-
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -143,7 +142,7 @@ const char *const kPossibleMusicSystems[] = {
 	"spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",
 };
 
-// hstring -> UTF-8, required for unicode text
+// hstring -> UTF-8, into a fixed buffer. Required to decode unicode text
 void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
 {
 	if (maxLen <= 0)
@@ -182,12 +181,6 @@ bool AppUserModelIdMatches(const winrt::hstring &appId, const char *needleUtf8)
 	return it != haystack.end();
 }
 
-GlobalSystemMediaTransportControlsSessionManager &GetSessionManager()
-{
-	static GlobalSystemMediaTransportControlsSessionManager manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
-	return manager;
-}
-
 void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaProperties &props, NativeMediaInfo *outInfo)
 {
 	auto thumbRef = props.Thumbnail();
@@ -212,10 +205,8 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	outInfo->ImageLength = (int)size;
 }
 
-
-bool GetCurrentTrackInternal(NativeMediaInfo *outInfo)
+bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
 {
-	GlobalSystemMediaTransportControlsSessionManager &manager = GetSessionManager();
 	auto sessions = manager.GetSessions();
 
 	GlobalSystemMediaTransportControlsSession session = nullptr;
@@ -256,7 +247,9 @@ bool GetCurrentTrackInternal(NativeMediaInfo *outInfo)
 	return true;
 }
 
-bool GetCurrentTrackNative(NativeMediaInfo *outInfo)
+// `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop
+// retries creating it every poll until it succeeds.
+bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
 {
 	if (outInfo == nullptr)
 		return false;
@@ -271,8 +264,12 @@ bool GetCurrentTrackNative(NativeMediaInfo *outInfo)
 	outInfo->ImageData = nullptr;
 	outInfo->ImageLength = 0;
 
+	if (!manager) {
+		return false;
+	}
+
 	try {
-		return GetCurrentTrackInternal(outInfo);
+		return GetCurrentTrackInternal(manager, outInfo);
 	} catch (const winrt::hresult_error &ex) {
 		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
 		outInfo->HasTrack = false;
@@ -1144,6 +1141,9 @@ static void poll_loop(spotify_source *ctx)
 		com_initialized = false;
 	}
 
+	//manager must be created inside poll_loop so OBS exits cleanly. Its a com apartment context thing.
+	GlobalSystemMediaTransportControlsSessionManager sessionManager = nullptr;
+
 	//Hold the last good bitmap for 2 seconds as some clients drop their session during track skip
 	constexpr auto MISSING_SESSION_GRACE = std::chrono::seconds(2);
 	bool gap_active = false;
@@ -1159,8 +1159,16 @@ static void poll_loop(spotify_source *ctx)
 			continue;
 		}
 
+		if (!sessionManager && com_initialized) {
+			try {
+				sessionManager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+			} catch (const winrt::hresult_error &) {
+				sessionManager = nullptr;
+			}
+		}
+
 		NativeMediaInfo info{};
-		bool has = GetCurrentTrackNative(&info);
+		bool has = GetCurrentTrackNative(sessionManager, &info);
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
@@ -1426,6 +1434,9 @@ static void poll_loop(spotify_source *ctx)
 			std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
 	}
+
+	// Release explicitly, on this same thread
+	sessionManager = nullptr;
 
 	if (com_initialized)
 		winrt::uninit_apartment();
