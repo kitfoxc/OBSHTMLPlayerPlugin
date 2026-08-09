@@ -1,6 +1,6 @@
 # Native OBS Plugin to Display Now Playing Widget
 
-<img width="1066" height="1803" alt="image" src="https://github.com/user-attachments/assets/0e35d43c-a671-4a59-b751-1b98bac01914" />
+<img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
 
 Vertical layout enable:
 
