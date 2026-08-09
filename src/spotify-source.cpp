@@ -55,7 +55,7 @@ using namespace Gdiplus;
 
 namespace {
 
-constexpr int POLL_INTERVAL_MS = 1000;
+constexpr int POLL_INTERVAL_MS = 250; // how often we ask SMTC for the current track; cheap local RPC, not a network call
 constexpr int DEFAULT_CARD_W = 380;
 constexpr int DEFAULT_CARD_H = 100;
 constexpr int PAD = 12;
@@ -198,10 +198,10 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	DataReader reader(stream);
 	reader.LoadAsync(size).get();
 
-	auto *buffer = new uint8_t[size];
-	reader.ReadBytes(winrt::array_view<uint8_t>(buffer, buffer + size));
+	std::unique_ptr<uint8_t[]> buffer(new uint8_t[size]);
+	reader.ReadBytes(winrt::array_view<uint8_t>(buffer.get(), buffer.get() + size));
 
-	outInfo->ImageData = buffer;
+	outInfo->ImageData = buffer.release();
 	outInfo->ImageLength = (int)size;
 }
 
@@ -1463,11 +1463,16 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", 
+	"card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", 
+	"vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", 
+	"progress_bg_color", "autohide_after_s",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", 
+	"show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", 
+	"autohide_when_not_playing",
 };
 
 static const char *const kSettingsStringKeys[] = {
