@@ -36,6 +36,6 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/spotify-source.cpp src/spotify-source.h src/SpotifyBridge.h)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/spotify-source.cpp src/spotify-source.h )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
