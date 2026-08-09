@@ -17,7 +17,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include "spotify-source.h"
-#include "SpotifyBridge.h"
 
 #include <obs-module.h>
 #include <util/dstr.h>
@@ -29,6 +28,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <objbase.h>
 #include <shlwapi.h>
 #include <gdiplus.h>
+
+
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
 
 #include <thread>
 #include <atomic>
@@ -100,6 +106,187 @@ std::wstring Utf8ToWide(const std::string &utf8)
 	std::wstring out(len - 1, L'\0');
 	MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, out.data(), len);
 	return out;
+}
+
+// ---------------------------------------------------------------------
+// Native SMTC reading (formerly SpotifyBridge.dll + SpotifyReader.dll)
+//
+// This block replaces the old C++/CLI bridge and its managed SpotifyReader.dll
+// assembly. GlobalSystemMediaTransportControlsSessionManager is a WinRT type,
+// and WinRT types are directly callable from plain native C++ via C++/WinRT
+// (the <winrt/...> headers) -- no .NET runtime, no AssemblyResolve handler,
+// and no separate DLL that can fail to load from the wrong directory.
+// ---------------------------------------------------------------------
+
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession;
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties;
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackInfo;
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus;
+using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionTimelineProperties;
+using winrt::Windows::Storage::Streams::DataReader;
+using winrt::Windows::Storage::Streams::IRandomAccessStreamWithContentType;
+
+struct NativeMediaInfo {
+	bool HasTrack;
+	int64_t SongDurationTicks;
+	int64_t CurrentPlaybackTimeTicks;
+	bool IsPlaying;
+	char SongName[256];
+	char ArtistName[256];
+	char AlbumName[256];
+	uint8_t *ImageData;
+	int ImageLength;
+};
+
+const char *const kPossibleMusicSystems[] = {
+	"spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",
+};
+
+// hstring -> UTF-8, required for unicode text
+void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
+{
+	if (maxLen <= 0)
+		return;
+	if (src.empty()) {
+		dst[0] = '\0';
+		return;
+	}
+
+	int needed = WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	if (needed <= 0) {
+		dst[0] = '\0';
+		return;
+	}
+
+	std::vector<char> utf8((size_t)needed); // needed includes the terminating null
+	WideCharToMultiByte(CP_UTF8, 0, src.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+
+	int copyLen = needed - 1; // exclude the null terminator itself from the length check
+	if (copyLen > maxLen - 1)
+		copyLen = maxLen - 1; // leave room for the null terminator
+
+	if (copyLen > 0)
+		memcpy(dst, utf8.data(), (size_t)copyLen);
+	dst[copyLen] = '\0';
+}
+
+bool AppUserModelIdMatches(const winrt::hstring &appId, const char *needleUtf8)
+{
+	std::wstring haystack(appId.c_str());
+	std::wstring needle = Utf8ToWide(needleUtf8);
+	if (needle.empty())
+		return false;
+
+	auto it = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(), [](wchar_t a, wchar_t b) { return towlower(a) == towlower(b); });
+	return it != haystack.end();
+}
+
+GlobalSystemMediaTransportControlsSessionManager &GetSessionManager()
+{
+	static GlobalSystemMediaTransportControlsSessionManager manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+	return manager;
+}
+
+void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaProperties &props, NativeMediaInfo *outInfo)
+{
+	auto thumbRef = props.Thumbnail();
+	if (!thumbRef)
+		return;
+
+	IRandomAccessStreamWithContentType stream = thumbRef.OpenReadAsync().get();
+	if (!stream)
+		return;
+
+	uint32_t size = (uint32_t)stream.Size();
+	if (size == 0)
+		return;
+
+	DataReader reader(stream);
+	reader.LoadAsync(size).get();
+
+	auto *buffer = new uint8_t[size];
+	reader.ReadBytes(winrt::array_view<uint8_t>(buffer, buffer + size));
+
+	outInfo->ImageData = buffer;
+	outInfo->ImageLength = (int)size;
+}
+
+
+bool GetCurrentTrackInternal(NativeMediaInfo *outInfo)
+{
+	GlobalSystemMediaTransportControlsSessionManager &manager = GetSessionManager();
+	auto sessions = manager.GetSessions();
+
+	GlobalSystemMediaTransportControlsSession session = nullptr;
+	uint32_t sessionCount = sessions.Size();
+	for (const char *system : kPossibleMusicSystems) {
+		for (uint32_t i = 0; i < sessionCount; i++) {
+			GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
+			if (AppUserModelIdMatches(s.SourceAppUserModelId(), system)) {
+				session = s;
+				break;
+			}
+		}
+		if (session)
+			break;
+	}
+
+	if (!session)
+		return false;
+
+	GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();
+	if (!props)
+		return false;
+
+	GlobalSystemMediaTransportControlsSessionTimelineProperties timeline = session.GetTimelineProperties();
+	GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo = session.GetPlaybackInfo();
+
+	outInfo->HasTrack = true;
+	outInfo->SongDurationTicks = (timeline.EndTime() - timeline.StartTime()).count();
+	outInfo->CurrentPlaybackTimeTicks = timeline.Position().count();
+	outInfo->IsPlaying = playbackInfo.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+
+	CopyHstringToUtf8(props.Title(), outInfo->SongName, 256);
+	CopyHstringToUtf8(props.Artist(), outInfo->ArtistName, 256);
+	CopyHstringToUtf8(props.AlbumTitle(), outInfo->AlbumName, 256);
+
+	ReadThumbnail(props, outInfo);
+
+	return true;
+}
+
+bool GetCurrentTrackNative(NativeMediaInfo *outInfo)
+{
+	if (outInfo == nullptr)
+		return false;
+
+	outInfo->SongDurationTicks = 0;
+	outInfo->CurrentPlaybackTimeTicks = 0;
+	outInfo->SongName[0] = '\0';
+	outInfo->ArtistName[0] = '\0';
+	outInfo->AlbumName[0] = '\0';
+	outInfo->IsPlaying = false;
+	outInfo->HasTrack = false;
+	outInfo->ImageData = nullptr;
+	outInfo->ImageLength = 0;
+
+	try {
+		return GetCurrentTrackInternal(outInfo);
+	} catch (const winrt::hresult_error &ex) {
+		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
+		outInfo->HasTrack = false;
+		return false;
+	} catch (const std::exception &ex) {
+		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %s", ex.what());
+		outInfo->HasTrack = false;
+		return false;
+	}
+}
+
+void FreeImageBuffer(uint8_t *buffer)
+{
+	delete[] buffer;
 }
 
 void AddRoundedRect(GraphicsPath &path, const Rect &r, int radius)
@@ -949,8 +1136,13 @@ static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s
 
 static void poll_loop(spotify_source *ctx)
 {
-	HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-	bool com_initialized = SUCCEEDED(com_hr);
+	bool com_initialized = false;
+	try {
+		winrt::init_apartment(winrt::apartment_type::multi_threaded);
+		com_initialized = true;
+	} catch (const winrt::hresult_error &) {
+		com_initialized = false;
+	}
 
 	//Hold the last good bitmap for 2 seconds as some clients drop their session during track skip
 	constexpr auto MISSING_SESSION_GRACE = std::chrono::seconds(2);
@@ -990,7 +1182,6 @@ static void poll_loop(spotify_source *ctx)
 			ctx->is_playing = info.IsPlaying;
 			auto now = std::chrono::steady_clock::now();
 
-			
 			if (ctx->is_playing) {
 				ctx->last_playing_time = now;
 			}
@@ -1237,7 +1428,7 @@ static void poll_loop(spotify_source *ctx)
 	}
 
 	if (com_initialized)
-		CoUninitialize();
+		winrt::uninit_apartment();
 }
 
 // ---------------------------------------------------------------------
@@ -1261,16 +1452,11 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", 
-	"album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", 
-	"progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", 
-	"vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", 
-	"show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", 
-	"track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing",
 };
 
 static const char *const kSettingsStringKeys[] = {
