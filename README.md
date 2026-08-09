@@ -58,7 +58,7 @@ or like this:
 
 <img width="1041" height="248" alt="image" src="https://github.com/user-attachments/assets/65fccbd2-6f99-4340-82e8-cb5a73c62436" />
 
-Then most likely Windows Defender has "blocked" the SpotifyReader.dll file. You can unblock this by going to , right clicking the `SpotifyReader.dll` file, clicking "Unblock", and then save. Then close OBS and reopen it, and the plugin should work.
+Then most likely Windows Defender has "blocked" the SpotifyReader.dll file. You can unblock this by going to `C:\Program Files\obs-studio\obs-plugins\64bit` (Or wherever youve installed OBS), right clicking the `SpotifyReader.dll` file, selecting `Properties`, and then clicking `Unblock`, and then `Apply`. Then close OBS and reopen it, and the plugin should work.
 
 This is an example of what the "Unblock" option looks like:
 
