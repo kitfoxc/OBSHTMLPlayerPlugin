@@ -41,9 +41,11 @@ To properly use the feature, you should resize your image to the same size as th
 
 The intent of this feature is to let people style their widget without having to have a million different options. So if you want to theme the widget to your stream, or if youre a vtuber and want to add your avatar to the card background or something like that, this is the perfect feature, but it really does require art specifically designed for it to work best.
 
-Example 380x100 card with 380x100 image background:
+Example 380x100 card and its 380x100 image background:
 
 <img width="456" height="134" alt="image" src="https://github.com/user-attachments/assets/e580d924-1498-4b38-b7d4-89cd265b691c" />
+
+<img width="380" height="100" alt="obs plugin background test 380x100" src="https://github.com/user-attachments/assets/fc494ad3-0f5d-4852-acbb-30e196749e0f" />
 
 
 ### The widget is blank, or its only show the name of the widget and this weird picture of a goat!
