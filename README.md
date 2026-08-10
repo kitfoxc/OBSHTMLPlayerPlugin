@@ -37,6 +37,8 @@ Only works on windows.
 
 The "image background" option will crop your image to the size of the widgets card, starting at the top left. So for example if your image is 600x600, and your card is 300x300, you will get the top left 1/4 of your image as the background.
 
+<img width="600" height="600" alt="spotifywidgetexample" src="https://github.com/user-attachments/assets/eb4b4651-ab44-4b31-b611-f77891497261" />
+
 To properly use the feature, you should resize your image to the same size as the card. So if your card is 300x300, your image should also be 300x300.
 
 The intent of this feature is to let people style their widget without having to have a million different options. So if you want to theme the widget to your stream, or if youre a vtuber and want to add your avatar to the card background or something like that, this is the perfect feature, but it really does require art specifically designed for it to work best.
