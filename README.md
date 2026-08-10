@@ -50,7 +50,7 @@ Example 380x100 card and its 380x100 image background:
 <img width="380" height="100" alt="obs plugin background test 380x100" src="https://github.com/user-attachments/assets/fc494ad3-0f5d-4852-acbb-30e196749e0f" />
 
 
-### The widget is blank, or its only show the name of the widget and this weird picture of a goat!
+### I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
 If the preview or the live source looks like this:
 
@@ -74,13 +74,9 @@ If you had an older version of the plugin, the font has probably defaulted now t
 
 ### The plugin is not loading at all!
 
-If the plugin doesnt load at all, you are probably missing .NET Framework 4.7.2 , which you can download from microsoft here: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472
+The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, and select "Unblock", and press apply.
 
-You only need the runtime, not the developer pack, but either will get you the components you need.
-
-You will also need VC 2015-2022 runtime, which you can also download from microsoft here: https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-You may also need the VC Redist 2015, which is again hosted by microsoft and can be found here: https://www.microsoft.com/en-ie/download/details.aspx?id=48145
+If you dont see the DLL there at all, then microsoft defender or some other anti-virus has likely removed it. Look up instructions for your particular anti-virus on how to resolve this, or extract another copy of it from the zip file, paste it in this folder manually, watch for any messages from your anti-virus, then follow its instructions to ignore this file.
 
 ### None of this helps me!
 
@@ -88,14 +84,11 @@ Please create an issue here on github or a post on the OBS forums thread (https:
 
 # Compilation from source notes:
 
-Requires the following libraries to compile properly:
+Version 2.0 and up compile identically to any other OBS plugin, no special features or libraries necessary. Follow their guide for getting started with plugin development.
+
+1.X will require additional libraries to build, or precompiled binaries.
 
 https://github.com/lingeriegoat/SpotifyReader
 
 https://github.com/lingeriegoat/CppSpotifyReaderDLLBridge
 
-The spotify reader DLL is written in c# because I am more comfortable working with windows using c#
-
-Most of the cpp code is AI generated because I am awful at writing cpp. Seems to work fine though.
-
-If you want to get the c# dll function working natively in cpp so this can be a single dll instead of 3 dlls, please feel free to fork this and let me know, id love to see that. My cpp is so bad i tried but cannot do it, even with AI help.
