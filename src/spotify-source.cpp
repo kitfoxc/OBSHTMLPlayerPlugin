@@ -55,7 +55,7 @@ using namespace Gdiplus;
 
 namespace {
 
-constexpr int POLL_INTERVAL_MS = 250; // how often we ask SMTC for the current track; cheap local RPC, not a network call
+constexpr int POLL_INTERVAL_MS = 250; // how often we poll SMTC
 constexpr int DEFAULT_CARD_W = 380;
 constexpr int DEFAULT_CARD_H = 100;
 constexpr int PAD = 12;
@@ -142,7 +142,7 @@ const char *const kPossibleMusicSystems[] = {
 	"spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",
 };
 
-// hstring -> UTF-8, into a fixed buffer. Required to decode unicode text
+// hstring -> UTF-8, Required to decode unicode text
 void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
 {
 	if (maxLen <= 0)
@@ -170,15 +170,19 @@ void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
 	dst[copyLen] = '\0';
 }
 
-bool AppUserModelIdMatches(const winrt::hstring &appId, const char *needleUtf8)
+bool IsStringInsideOtherString(const char *searchStringUtf8, const winrt::hstring &incomingStringToSearchAgainst)
 {
-	std::wstring haystack(appId.c_str());
-	std::wstring needle = Utf8ToWide(needleUtf8);
-	if (needle.empty())
+	if (!searchStringUtf8) {
 		return false;
+	}
+	std::wstring stringToSearchAgainst(incomingStringToSearchAgainst.c_str());
+	std::wstring searchString = Utf8ToWide(searchStringUtf8);
+	if (searchString.empty() || stringToSearchAgainst.empty()) {
+		return false;
+	}
 
-	auto it = std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end(), [](wchar_t a, wchar_t b) { return towlower(a) == towlower(b); });
-	return it != haystack.end();
+	auto it = std::search(stringToSearchAgainst.begin(), stringToSearchAgainst.end(), searchString.begin(), searchString.end(), [](wchar_t a, wchar_t b) { return towlower(a) == towlower(b); });
+	return it != stringToSearchAgainst.end();
 }
 
 void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaProperties &props, NativeMediaInfo *outInfo)
@@ -214,7 +218,7 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 	for (const char *system : kPossibleMusicSystems) {
 		for (uint32_t i = 0; i < sessionCount; i++) {
 			GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
-			if (AppUserModelIdMatches(s.SourceAppUserModelId(), system)) {
+			if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
 				session = s;
 				break;
 			}
@@ -1099,8 +1103,6 @@ static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s
 
 	float target = 1.0f;
 
-	// "Autohide after track change": fades out a fixed, user-configurable delay after the
-	// source became active / the last track change, regardless of playback state.
 	if (s.autohide_enabled) {
 		if (obs_source_active(ctx->source)) {
 			double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->autohide_reference_time).count();
@@ -1110,8 +1112,6 @@ static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s
 		}
 	}
 
-	// "Autohide when music is not playing": fades out a fixed 10s after playback was last
-	// observed to be playing -- covers both paused/stopped tracks and no track/session at all.
 	if (s.autohide_when_not_playing) {
 		double notPlayingElapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->last_playing_time).count();
 		double notPlayingDelayMs = (double)DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S * 1000.0;
