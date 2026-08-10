@@ -1,4 +1,4 @@
-# Native OBS Plugin to Display Now Playing Widget
+# NowPlaying Widget for OBS, No External Software Required
 
 <img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
 
@@ -8,7 +8,7 @@ Vertical layout enable:
 
 
 
-This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. This is all native inside of OBS.
+This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. Everything runs entirely inside of OBS.
 
 Works for Spotify, YoutubeMusic desktop clients, and Apple Music. As of version 1.10, VLC player is also supported, but requires a VLC plugin to actually function. You can find the required VLC plugin here: https://github.com/spmn/vlc-win10smtc . Make sure to read the installation instructions thoroughly, as it is not installed like a "normal" VLC plugin, you need to configure it or it will not do anything.
 
