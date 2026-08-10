@@ -1,4 +1,4 @@
-# Native OBS Plugin to Display Now Playing Widget
+# NowPlaying Widget for OBS, No External Software Required
 
 <img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
 
@@ -8,7 +8,7 @@ Vertical layout enable:
 
 
 
-This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. This is all native inside of OBS.
+This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs or web servers or browser sources or any of that stuff. Everything runs entirely inside of OBS.
 
 Works for Spotify, YoutubeMusic desktop clients, and Apple Music. As of version 1.10, VLC player is also supported, but requires a VLC plugin to actually function. You can find the required VLC plugin here: https://github.com/spmn/vlc-win10smtc . Make sure to read the installation instructions thoroughly, as it is not installed like a "normal" VLC plugin, you need to configure it or it will not do anything.
 
@@ -37,6 +37,8 @@ Only works on windows.
 
 The "image background" option will crop your image to the size of the widgets card, starting at the top left. So for example if your image is 600x600, and your card is 300x300, you will get the top left 1/4 of your image as the background.
 
+<img width="600" height="600" alt="spotifywidgetexample" src="https://github.com/user-attachments/assets/eb4b4651-ab44-4b31-b611-f77891497261" />
+
 To properly use the feature, you should resize your image to the same size as the card. So if your card is 300x300, your image should also be 300x300.
 
 The intent of this feature is to let people style their widget without having to have a million different options. So if you want to theme the widget to your stream, or if youre a vtuber and want to add your avatar to the card background or something like that, this is the perfect feature, but it really does require art specifically designed for it to work best.
@@ -48,7 +50,7 @@ Example 380x100 card and its 380x100 image background:
 <img width="380" height="100" alt="obs plugin background test 380x100" src="https://github.com/user-attachments/assets/fc494ad3-0f5d-4852-acbb-30e196749e0f" />
 
 
-### The widget is blank, or its only show the name of the widget and this weird picture of a goat!
+### I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
 If the preview or the live source looks like this:
 
@@ -72,13 +74,9 @@ If you had an older version of the plugin, the font has probably defaulted now t
 
 ### The plugin is not loading at all!
 
-If the plugin doesnt load at all, you are probably missing .NET Framework 4.7.2 , which you can download from microsoft here: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472
+The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, and select "Unblock", and press apply.
 
-You only need the runtime, not the developer pack, but either will get you the components you need.
-
-You will also need VC 2015-2022 runtime, which you can also download from microsoft here: https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-You may also need the VC Redist 2015, which is again hosted by microsoft and can be found here: https://www.microsoft.com/en-ie/download/details.aspx?id=48145
+If you dont see the DLL there at all, then microsoft defender or some other anti-virus has likely removed it. Look up instructions for your particular anti-virus on how to resolve this, or extract another copy of it from the zip file, paste it in this folder manually, watch for any messages from your anti-virus, then follow its instructions to ignore this file.
 
 ### None of this helps me!
 
@@ -86,14 +84,11 @@ Please create an issue here on github or a post on the OBS forums thread (https:
 
 # Compilation from source notes:
 
-Requires the following libraries to compile properly:
+Version 2.0 and up compile identically to any other OBS plugin, no special features or libraries necessary. Follow their guide for getting started with plugin development.
+
+1.X will require additional libraries to build, or precompiled binaries.
 
 https://github.com/lingeriegoat/SpotifyReader
 
 https://github.com/lingeriegoat/CppSpotifyReaderDLLBridge
 
-The spotify reader DLL is written in c# because I am more comfortable working with windows using c#
-
-Most of the cpp code is AI generated because I am awful at writing cpp. Seems to work fine though.
-
-If you want to get the c# dll function working natively in cpp so this can be a single dll instead of 3 dlls, please feel free to fork this and let me know, id love to see that. My cpp is so bad i tried but cannot do it, even with AI help.
