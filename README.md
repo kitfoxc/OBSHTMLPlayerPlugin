@@ -1,3 +1,10 @@
+If you like my plugin, please check out my stream on twitch!
+
+https://www.twitch.tv/lingeriegoat
+
+[<img width="600" height="225" alt="image" src="https://github.com/user-attachments/assets/a7cb5155-84c2-467d-8ad1-d9e2e48af65d" />](https://www.twitch.tv/lingeriegoat)
+
+
 # NowPlaying Widget for OBS, No External Software Required
 
 <img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
