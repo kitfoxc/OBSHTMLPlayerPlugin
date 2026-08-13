@@ -36,7 +36,11 @@ If you want to use a release before 1.8, the distribution method was slightly di
 
 # Known limitations
 
-Only works on windows. 
+Only works on windows. Only works for spotify, youtube music, and apple music desktop clients. Works with VLC but requires a specific plugin.
+
+If you want more sources to be supported, please let me know what they are and I can see if its feasible to add support.
+
+Mac and linux support are infeasible as this plugin relies on a windows subsystem which has no equivalent on either mac or linux.
 
 # Troubleshooting
 
