@@ -9,7 +9,7 @@ https://www.twitch.tv/lingeriegoat
 
 <img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
 
-Vertical layout enable:
+Vertical layout enabled:
 
 <img width="439" height="605" alt="image" src="https://github.com/user-attachments/assets/b3856bcb-d0b8-4714-8e75-7de41b475d8f" />
 
