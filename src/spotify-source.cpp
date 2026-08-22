@@ -1760,7 +1760,7 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 	obs_property_t *path_prop = obs_properties_get(props, "bg_image_path");
 	obs_property_t *bg_color_prop = obs_properties_get(props, "bg_color");
 	obs_property_set_enabled(path_prop, enabled);
-	obs_property_set_enabled(bg_color_prop, enabled);
+	obs_property_set_enabled(bg_color_prop, !enabled);
 	return true;
 }
 
