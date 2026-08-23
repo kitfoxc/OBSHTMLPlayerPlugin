@@ -38,4 +38,8 @@ endif()
 
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/spotify-source.cpp src/spotify-source.h )
 
+if(MSVC)
+  set_source_files_properties(src/spotify-source.cpp PROPERTIES COMPILE_OPTIONS /EHa)
+endif()
+
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})

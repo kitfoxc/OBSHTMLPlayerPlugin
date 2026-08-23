@@ -227,15 +227,21 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 			break;
 	}
 
-	if (!session)
+	if (!session) {
 		return false;
+	}
 
 	GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();
-	if (!props)
+	if (!props) {
 		return false;
+	}
 
 	GlobalSystemMediaTransportControlsSessionTimelineProperties timeline = session.GetTimelineProperties();
 	GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo = session.GetPlaybackInfo();
+
+	if (!timeline || !playbackInfo) {
+		return false;
+	}
 
 	outInfo->HasTrack = true;
 	outInfo->SongDurationTicks = (timeline.EndTime() - timeline.StartTime()).count();
@@ -280,6 +286,16 @@ bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager cons
 		return false;
 	} catch (const std::exception &ex) {
 		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %s", ex.what());
+		outInfo->HasTrack = false;
+		return false;
+	}
+}
+
+static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
+{
+	__try {
+		return GetCurrentTrackNative(manager, outInfo);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		outInfo->HasTrack = false;
 		return false;
 	}
@@ -1168,7 +1184,7 @@ static void poll_loop(spotify_source *ctx)
 		}
 
 		NativeMediaInfo info{};
-		bool has = GetCurrentTrackNative(sessionManager, &info);
+		bool has = GetCurrentTrackSafe(sessionManager, &info);
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
