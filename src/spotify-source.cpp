@@ -55,6 +55,7 @@ using namespace Gdiplus;
 
 namespace {
 
+constexpr int DEFAULT_SESSION_GRACE_SECONDS = 3;
 constexpr int POLL_INTERVAL_MS = 250; // how often we poll SMTC
 constexpr int DEFAULT_CARD_W = 380;
 constexpr int DEFAULT_CARD_H = 100;
@@ -1161,7 +1162,7 @@ static void poll_loop(spotify_source *ctx)
 	GlobalSystemMediaTransportControlsSessionManager sessionManager = nullptr;
 
 	//Hold the last good bitmap for 2 seconds as some clients drop their session during track skip
-	constexpr auto MISSING_SESSION_GRACE = std::chrono::seconds(2);
+	constexpr auto MISSING_SESSION_GRACE = std::chrono::seconds(DEFAULT_SESSION_GRACE_SECONDS);
 	bool gap_active = false;
 	std::chrono::steady_clock::time_point gap_start{};
 
