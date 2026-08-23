@@ -42,7 +42,10 @@ If you want more sources to be supported, please let me know what they are and I
 
 Mac and linux support are infeasible as this plugin relies on a windows subsystem which has no equivalent on either mac or linux.
 
+
+
 # Troubleshooting
+
 
 ### How do I use the image background?
 
@@ -60,6 +63,26 @@ Example 380x100 card and its 380x100 image background:
 
 <img width="380" height="100" alt="obs plugin background test 380x100" src="https://github.com/user-attachments/assets/fc494ad3-0f5d-4852-acbb-30e196749e0f" />
 
+
+
+### Im using spotify and the plugin isnt detecting any music!
+
+In spotify, make sure you have enabled the "Show desktop overlay when using media keys" option. There seems to be a bug in spotify that when this is disabled, spotify stops sending data to windows SMTC, which is what we scrape from. If you really need this option disabled, please file a bug with spotify to have this fix.
+
+<img width="933" height="177" alt="image" src="https://github.com/user-attachments/assets/13c36a34-1730-4b71-9f6f-a12ec56532a0" />
+
+
+
+### I want to play spotify or youtube music from my browser, will this work?
+
+Not right now, for 2 reasons. One, there is currently a bug in firefox (https://bugzilla.mozilla.org/show_bug.cgi?id=2065866) where firefox reports a really annoying name for itself in SMTC. This makes it nearly impossible to track reliably across different peoples machines. I dont really want to add browser support and leave out the 2nd most popular browser, or implement it in a way that is only semi-functional.
+
+The second reason is that its a really good way to shoot yourself in the foot, since browsers report ANY media, and do it in a way where the most recent media is what is usually displayed. So imagine a scenario where you have spotify open in one tab, and then in another tab you navigate to some kind of "compromising" media that is now being prominently displayed on your stream... So I am trying to think of a good way to implement this that is explicitly opt-in, and make it explicitly clear that enabling the feature has the potential to cause personal or embarrassing data to leak into your stream.
+
+
+### The Artist text is very small
+
+If you had an older version of the plugin, the font has probably defaulted now that it can be changed separately. Simply open the options and select a new font. The old default was -2px smaller than whatever the Title font is, and "Regular" weight (ie, not bold or italic).
 
 ### I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
@@ -79,23 +102,27 @@ This is an example of what the "Unblock" option looks like:
 
 The other possibility is that you are using an unsupported music source. If this is the case, please make an issue here on git, or a post on the OBS plugin thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing what software you are trying to use with the plugin, and where it can be downloaded, and I can look into whether its possible to add support. 
 
-### The Artist text is very small
 
-If you had an older version of the plugin, the font has probably defaulted now that it can be changed separately. Simply open the options and select a new font. The old default was -2px smaller than whatever the Title font is, and "Regular" weight (ie, not bold or italic).
 
 ### The plugin is not loading at all!
 
-The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, and select "Unblock", and press apply.
+The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, select "Properties", select "Unblock", and then press apply.
 
-If you dont see the DLL there at all, then microsoft defender or some other anti-virus has likely removed it. Look up instructions for your particular anti-virus on how to resolve this, or extract another copy of it from the zip file, paste it in this folder manually, watch for any messages from your anti-virus, then follow its instructions to ignore this file.
+If you dont see the DLL there at all, then microsoft defender or some other anti-virus has likely removed it. Look up instructions for your particular anti-virus on how to resolve this, or extract another copy of it from the zip file, paste it in this folder manually, watch for any messages from your anti-virus, then follow its instructions to have it ignore this file.
+
+
 
 ### None of this helps me!
 
 Please create an issue here on github or a post on the OBS forums thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing the problem with as much detail as possible, I will try to help you.
 
+
+
 # Compilation from source notes:
 
 Version 2.0 and up compile identically to any other OBS plugin, no special features or libraries necessary. Follow their guide for getting started with plugin development.
+
+The basics are: clone this repo and then run `cmake --build --preset windows-x64 --config Release` in the root directory.
 
 1.X will require additional libraries to build, or precompiled binaries.
 
