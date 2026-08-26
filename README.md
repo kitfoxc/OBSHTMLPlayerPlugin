@@ -19,6 +19,8 @@ This plugin allows you to have a native "now playing" widget inside of OBS. No n
 
 Works for Spotify, YoutubeMusic desktop clients, and Apple Music. As of version 1.10, VLC player is also supported, but requires a VLC plugin to actually function. You can find the required VLC plugin here: https://github.com/spmn/vlc-win10smtc . Make sure to read the installation instructions thoroughly, as it is not installed like a "normal" VLC plugin, you need to configure it or it will not do anything.
 
+As of version 2.2, we now support browsers as media sources. This option defaults to off, but can be enabled in the plugin settings. Please read the warning carefully before enabling this feature. I do not recommend using this feature, but it is available if you really want it.
+
 More services may be added later if they are requested and I can reasonably get a copy of the program.
 
 # How to use
@@ -75,9 +77,17 @@ In spotify, make sure you have enabled the "Show desktop overlay when using medi
 
 ### I want to play spotify or youtube music from my browser, will this work?
 
-Not right now, for 2 reasons. One, there is currently a bug in firefox (https://bugzilla.mozilla.org/show_bug.cgi?id=2065866) where firefox reports a really annoying name for itself in SMTC. This makes it nearly impossible to track reliably across different peoples machines. I dont really want to add browser support and leave out the 2nd most popular browser, or implement it in a way that is only semi-functional.
+Yes. You need to enable the option "Enable Browser Media Sources?". Please read the warning very carefully, as its very easy to leak embarrassing information into your stream.
 
-The second reason is that its a really good way to shoot yourself in the foot, since browsers report ANY media, and do it in a way where the most recent media is what is usually displayed. So imagine a scenario where you have spotify open in one tab, and then in another tab you navigate to some kind of "compromising" media that is now being prominently displayed on your stream... So I am trying to think of a good way to implement this that is explicitly opt-in, and make it explicitly clear that enabling the feature has the potential to cause personal or embarrassing data to leak into your stream.
+<img width="722" height="274" alt="image" src="https://github.com/user-attachments/assets/86669b3f-613c-4514-96fc-bfb4686143f9" />
+
+Browsers are chosen in ranked ordering, just as the normal music sources are. The ranking is:
+
+`"operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome"`
+
+meaning that Opera will be chosen before Chrome. 
+
+Browsers will ONLY be considered a valid candidate if you have the option enabled, and ONLY if no "traditional" music source is found first (spotify desktop, youtube music desktop, etc).
 
 
 ### The Artist text is very small
