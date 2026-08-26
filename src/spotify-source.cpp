@@ -94,6 +94,8 @@ constexpr int DEFAULT_AUTOHIDE_AFTER_S = 5;
 
 constexpr int DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S = 10;
 
+constexpr bool DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES = false;
+
 ULONG_PTR g_gdiplusToken = 0;
 
 std::wstring Utf8ToWide(const std::string &utf8)
@@ -139,9 +141,11 @@ struct NativeMediaInfo {
 	int ImageLength;
 };
 
-const char *const kPossibleMusicSystems[] = {
-	"spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",
-};
+const char *const kPossibleMusicSystems[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc", };
+
+//"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
+//https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
+const char *const kPossibleBrowserMediaSources[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
 
 // hstring -> UTF-8, Required to decode unicode text
 void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
@@ -210,7 +214,7 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	outInfo->ImageLength = (int)size;
 }
 
-bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
+bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
 {
 	auto sessions = manager.GetSessions();
 
@@ -226,6 +230,22 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 		}
 		if (session)
 			break;
+	}
+
+	if (browserSourcesEnabled) {
+		if (!session) {
+			for (const char *system : kPossibleBrowserMediaSources) {
+				for (uint32_t i = 0; i < sessionCount; i++) {
+					GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
+					if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
+						session = s;
+						break;
+					}
+				}
+				if (session)
+					break;
+			}
+		}
 	}
 
 	if (!session) {
@@ -260,7 +280,7 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 
 // `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop
 // retries creating it every poll until it succeeds.
-bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
+bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
 {
 	if (outInfo == nullptr)
 		return false;
@@ -280,22 +300,22 @@ bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager cons
 	}
 
 	try {
-		return GetCurrentTrackInternal(manager, outInfo);
+		return GetCurrentTrackInternal(manager, outInfo, browserSourcesEnabled);
 	} catch (const winrt::hresult_error &ex) {
-		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
+		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
 		outInfo->HasTrack = false;
 		return false;
 	} catch (const std::exception &ex) {
-		blog(LOG_DEBUG, "[spotify_now_playing] SMTC read failed: %s", ex.what());
+		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %s", ex.what());
 		outInfo->HasTrack = false;
 		return false;
 	}
 }
 
-static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo)
+static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
 {
 	__try {
-		return GetCurrentTrackNative(manager, outInfo);
+		return GetCurrentTrackNative(manager, outInfo, browserSourcesEnabled);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		outInfo->HasTrack = false;
 		return false;
@@ -484,6 +504,7 @@ struct spotify_source {
 	int progress_bar_gap = DEFAULT_PROGRESS_BAR_GAP;
 	int progress_bar_height = DEFAULT_PROGRESS_BAR_HEIGHT;
 	int scroll_speed_ms = DEFAULT_SCROLL_SPEED_MS; // ms per letter for the marquee scroll
+	bool browser_media_source_enabled = DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES;
 	bool vu_meter_enabled = true;
 	long long vu_color = 0xFFFFFFFF;
 	int vu_update_ms = 250;
@@ -597,6 +618,7 @@ struct AppearanceSettings {
 	int progress_bar_gap;
 	int progress_bar_height;
 	int scroll_speed_ms;
+	bool browser_media_source_enabled;
 	bool vu_meter_enabled;
 	long long vu_color;
 	int vu_update_ms;
@@ -1088,6 +1110,7 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 		ctx->progress_bar_gap, 
 		ctx->progress_bar_height, 
 		ctx->scroll_speed_ms, 
+		ctx->browser_media_source_enabled, 
 		ctx->vu_meter_enabled, 
 		ctx->vu_color, 
 		ctx->vu_update_ms, 
@@ -1185,7 +1208,7 @@ static void poll_loop(spotify_source *ctx)
 		}
 
 		NativeMediaInfo info{};
-		bool has = GetCurrentTrackSafe(sessionManager, &info);
+		bool has = GetCurrentTrackSafe(sessionManager, &info, ctx->browser_media_source_enabled);
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
@@ -1624,6 +1647,8 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->scroll_speed_ms = (int)obs_data_get_int(settings, "scroll_speed_ms");
 	ctx->scroll_speed_ms = std::clamp(ctx->scroll_speed_ms, 20, 5000);
 
+	ctx->browser_media_source_enabled = obs_data_get_bool(settings, "enable_browser_media");
+
 	ctx->vu_meter_enabled = obs_data_get_bool(settings, "vu_meter_enabled");
 	ctx->vu_color = obs_data_get_int(settings, "vu_color");
 
@@ -1700,6 +1725,7 @@ static void spotify_source_update(void *data, obs_data_t *settings)
 
 static void spotify_source_defaults(obs_data_t *settings)
 {
+	obs_data_set_default_bool(settings, "enable_browser_media", DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES);
 	obs_data_set_default_int(settings, "title_color", DEFAULT_COLOR_WHITE);
 	obs_data_set_default_int(settings, "artist_color", DEFAULT_COLOR_WHITE);
 
@@ -1781,6 +1807,7 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 	return true;
 }
 
+
 static obs_properties_t *spotify_source_properties(void *)
 {
 	obs_properties_t *props = obs_properties_create();
@@ -1829,6 +1856,12 @@ static obs_properties_t *spotify_source_properties(void *)
 
 	obs_property_t *import_settings_prop = obs_properties_add_path(props, "import_settings_path", obs_module_text("ImportSettings"), OBS_PATH_FILE, "JSON (*.json)", nullptr);
 	obs_property_set_modified_callback(import_settings_prop, import_settings_modified);
+
+	//Warning: Do not use a global for this value, as tempting as it is
+	//apparently globals are shared between ALL instances of a plugin. Weird.
+	obs_property_t *enable_browser_prop = obs_properties_add_bool(props, "enable_browser_media", obs_module_text("EnableBrowserMedia"));
+	obs_properties_add_text(props, "enable_browser_media_warning", obs_module_text("EnableBrowserMediaWarning"), OBS_TEXT_INFO);
+
 
 	return props;
 }

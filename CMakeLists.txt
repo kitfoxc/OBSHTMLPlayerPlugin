@@ -16,7 +16,7 @@ include(helpers)
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs gdiplus shlwapi ${CMAKE_SOURCE_DIR}/lib/SpotifyBridge.lib)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs gdiplus shlwapi)
 
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
