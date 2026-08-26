@@ -1,0 +1,8 @@
+spotify
+youtube
+ytm
+pear
+applemusic
+cider
+focal
+vlc

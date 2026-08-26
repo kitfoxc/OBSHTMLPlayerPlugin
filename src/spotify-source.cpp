@@ -35,18 +35,20 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Storage.Streams.h>
 
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <vector>
-#include <string>
-#include <chrono>
 #include <algorithm>
-#include <random>
+#include <atomic>
+#include <chrono>
 #include <cmath>
-#include <memory>
 #include <cstring>
+#include <exception>
 #include <fstream>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -96,6 +98,9 @@ constexpr int DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S = 10;
 
 constexpr bool DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES = false;
 
+const char *const DEFAULT_MUSIC_SYSTEMS[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",};
+const char *const DEFAULT_BROWSER_SOURCES[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
+
 ULONG_PTR g_gdiplusToken = 0;
 
 std::wstring Utf8ToWide(const std::string &utf8)
@@ -141,11 +146,67 @@ struct NativeMediaInfo {
 	int ImageLength;
 };
 
-const char *const kPossibleMusicSystems[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc", };
 
-//"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
-//https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
-const char *const kPossibleBrowserMediaSources[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
+//const char *const kPossibleMusicSystems[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc", };
+//
+////"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
+////https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
+//const char *const kPossibleBrowserMediaSources[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
+
+std::vector<std::string> LoadStringList(const char *filename)
+{
+	std::vector<std::string> strings;
+
+	try {
+		if (!filename || !*filename)
+			return strings;
+
+		char *path = obs_module_file(filename);
+		if (!path) {
+			blog(LOG_ERROR, "[spotify_now_playing] Failed to resolve path for '%s'", filename);
+			return strings;
+		}
+
+		std::ifstream file(path);
+		bfree(path);
+
+		if (!file.is_open()) {
+			blog(LOG_ERROR, "[spotify_now_playing] Failed to open '%s'", filename);
+			return strings;
+		}
+
+		std::string line;
+
+		while (std::getline(file, line)) {
+			// Remove UTF-8 BOM from the first line if present
+			if (strings.empty() && line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF && static_cast<unsigned char>(line[1]) == 0xBB && static_cast<unsigned char>(line[2]) == 0xBF) {
+				line.erase(0, 3);
+			}
+
+			// Trim whitespace and commas from both ends
+			const size_t start = line.find_first_not_of(" \t\r\n,");
+			if (start == std::string::npos)
+				continue;
+
+			const size_t end = line.find_last_not_of(" \t\r\n,");
+
+			line = line.substr(start, end - start + 1);
+
+			if (!line.empty())
+				strings.push_back(line);
+		}
+	} catch (const std::exception &e) {
+		blog(LOG_ERROR, "[spotify_now_playing] Exception loading system sources lists '%s': %s", filename ? filename : "(null)", e.what());
+
+		strings.clear();
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] Unknown exception loading system sources lists '%s'", filename ? filename : "(null)");
+
+		strings.clear();
+	}
+
+	return strings;
+}
 
 // hstring -> UTF-8, Required to decode unicode text
 void CopyHstringToUtf8(const winrt::hstring &src, char *dst, int maxLen)
@@ -214,13 +275,13 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	outInfo->ImageLength = (int)size;
 }
 
-bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
+bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
 	auto sessions = manager.GetSessions();
 
 	GlobalSystemMediaTransportControlsSession session = nullptr;
 	uint32_t sessionCount = sessions.Size();
-	for (const char *system : kPossibleMusicSystems) {
+	for (const char *system : possibleMusicSystems) {
 		for (uint32_t i = 0; i < sessionCount; i++) {
 			GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
 			if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
@@ -234,7 +295,7 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 
 	if (browserSourcesEnabled) {
 		if (!session) {
-			for (const char *system : kPossibleBrowserMediaSources) {
+			for (const char *system : possibleBrowserMediaSources) {
 				for (uint32_t i = 0; i < sessionCount; i++) {
 					GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
 					if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
@@ -280,7 +341,7 @@ bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager co
 
 // `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop
 // retries creating it every poll until it succeeds.
-bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
+bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
 	if (outInfo == nullptr)
 		return false;
@@ -300,7 +361,7 @@ bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager cons
 	}
 
 	try {
-		return GetCurrentTrackInternal(manager, outInfo, browserSourcesEnabled);
+		return GetCurrentTrackInternal(manager, outInfo, possibleMusicSystems, possibleBrowserMediaSources, browserSourcesEnabled);
 	} catch (const winrt::hresult_error &ex) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
 		outInfo->HasTrack = false;
@@ -312,10 +373,14 @@ bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager cons
 	}
 }
 
-static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, bool browserSourcesEnabled)
+
+std::vector<const char *> kPossibleMusicSystems;
+std::vector<const char *> kPossibleBrowserMediaSources;
+
+static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
 	__try {
-		return GetCurrentTrackNative(manager, outInfo, browserSourcesEnabled);
+		return GetCurrentTrackNative(manager, outInfo, possibleMusicSystems, possibleBrowserMediaSources, browserSourcesEnabled);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		outInfo->HasTrack = false;
 		return false;
@@ -480,6 +545,11 @@ struct spotify_source {
 	std::thread poll_thread;
 	std::atomic<bool> running{false};
 	std::atomic<bool> is_active{false}; // true only while this source's scene is part of the live/program output
+
+	std::vector<std::string> musicSystemStrings;
+	std::vector<std::string> browserMediaSourceStrings;
+	std::vector<const char *> kPossibleMusicSystems;
+	std::vector<const char *> kPossibleBrowserMediaSources;
 
 	std::mutex settings_mutex;
 	long long title_color = DEFAULT_COLOR_WHITE;
@@ -1208,7 +1278,7 @@ static void poll_loop(spotify_source *ctx)
 		}
 
 		NativeMediaInfo info{};
-		bool has = GetCurrentTrackSafe(sessionManager, &info, ctx->browser_media_source_enabled);
+		bool has = GetCurrentTrackSafe(sessionManager, &info, ctx->kPossibleMusicSystems, ctx->kPossibleBrowserMediaSources, ctx->browser_media_source_enabled);
 
 		std::string title = has ? std::string(info.SongName) : std::string();
 		std::string artist = has ? std::string(info.ArtistName) : std::string();
@@ -1480,6 +1550,70 @@ static void poll_loop(spotify_source *ctx)
 
 	if (com_initialized)
 		winrt::uninit_apartment();
+}
+
+void InitSourcesLists(spotify_source *ctx)
+{
+	std::string output;
+
+	try {
+		ctx->musicSystemStrings = LoadStringList("media-sources-music.txt");
+		ctx->browserMediaSourceStrings = LoadStringList("media-sources-browser.txt");
+
+		if (ctx->musicSystemStrings.empty()) {
+			ctx->kPossibleMusicSystems.assign(std::begin(DEFAULT_MUSIC_SYSTEMS), std::end(DEFAULT_MUSIC_SYSTEMS));
+			blog(LOG_ERROR, "[spotify_now_playing] possiblemusicsystems came back empty, reverting to defaults");
+		} else {
+			ctx->kPossibleMusicSystems.reserve(ctx->musicSystemStrings.size());
+			for (const auto &s : ctx->musicSystemStrings) {
+				ctx->kPossibleMusicSystems.push_back(s.c_str());
+			}
+		}
+
+		if (ctx->browserMediaSourceStrings.empty()) {
+			ctx->kPossibleBrowserMediaSources.assign(std::begin(DEFAULT_BROWSER_SOURCES), std::end(DEFAULT_BROWSER_SOURCES));
+			blog(LOG_ERROR, "[spotify_now_playing] possiblebrowsers came back empty, reverting to defaults");
+		} else {
+			ctx->kPossibleBrowserMediaSources.reserve(ctx->browserMediaSourceStrings.size());
+			for (const auto &s : ctx->browserMediaSourceStrings) {
+				ctx->kPossibleBrowserMediaSources.push_back(s.c_str());
+			}
+		}
+	} catch (...) {
+		ctx->musicSystemStrings.clear();
+		ctx->browserMediaSourceStrings.clear();
+		ctx->kPossibleMusicSystems.clear();
+		ctx->kPossibleBrowserMediaSources.clear();
+
+		ctx->kPossibleMusicSystems.assign(std::begin(DEFAULT_MUSIC_SYSTEMS), std::end(DEFAULT_MUSIC_SYSTEMS));
+		ctx->kPossibleBrowserMediaSources.assign(std::begin(DEFAULT_BROWSER_SOURCES), std::end(DEFAULT_BROWSER_SOURCES));
+
+		blog(LOG_ERROR, "[spotify_now_playing] Unknown error reading in music or browser systems, reverting to defaults");
+	}
+
+	for (const char *system : ctx->kPossibleMusicSystems) {
+		if (!output.empty())
+			output += ", ";
+
+		output += "\"";
+		output += system;
+		output += "\"";
+	}
+
+	blog(LOG_INFO, "[spotify_now_playing] Using this list of music sources: %s", output.c_str());
+
+	output.clear();
+
+	for (const char *system : ctx->kPossibleBrowserMediaSources) {
+		if (!output.empty())
+			output += ", ";
+
+		output += "\"";
+		output += system;
+		output += "\"";
+	}
+
+	blog(LOG_INFO, "[spotify_now_playing] Using this list of browser sources: %s", output.c_str());
 }
 
 // ---------------------------------------------------------------------
@@ -1871,6 +2005,7 @@ static void *spotify_source_create(obs_data_t *settings, obs_source_t *source)
 	auto *ctx = new spotify_source();
 	ctx->source = source;
 	apply_settings(ctx, settings);
+	InitSourcesLists(ctx);
 
 	auto now = std::chrono::steady_clock::now();
 	ctx->autohide_reference_time = now;
