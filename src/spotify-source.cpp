@@ -98,6 +98,8 @@ constexpr int DEFAULT_NOT_PLAYING_AUTOHIDE_AFTER_S = 10;
 
 constexpr bool DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES = false;
 
+//"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
+//https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
 const char *const DEFAULT_MUSIC_SYSTEMS[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",};
 const char *const DEFAULT_BROWSER_SOURCES[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
 
@@ -145,13 +147,6 @@ struct NativeMediaInfo {
 	uint8_t *ImageData;
 	int ImageLength;
 };
-
-
-//const char *const kPossibleMusicSystems[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc", };
-//
-////"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
-////https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
-//const char *const kPossibleBrowserMediaSources[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
 
 std::vector<std::string> LoadStringList(const char *filename)
 {
@@ -275,76 +270,13 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	outInfo->ImageLength = (int)size;
 }
 
-bool GetCurrentTrackInternal(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
+
+// `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop retries creating it every poll until it succeeds.
+static bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
-	auto sessions = manager.GetSessions();
-
-	GlobalSystemMediaTransportControlsSession session = nullptr;
-	uint32_t sessionCount = sessions.Size();
-	for (const char *system : possibleMusicSystems) {
-		for (uint32_t i = 0; i < sessionCount; i++) {
-			GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
-			if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
-				session = s;
-				break;
-			}
-		}
-		if (session)
-			break;
-	}
-
-	if (browserSourcesEnabled) {
-		if (!session) {
-			for (const char *system : possibleBrowserMediaSources) {
-				for (uint32_t i = 0; i < sessionCount; i++) {
-					GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
-					if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
-						session = s;
-						break;
-					}
-				}
-				if (session)
-					break;
-			}
-		}
-	}
-
-	if (!session) {
+	if (outInfo == nullptr) {
 		return false;
 	}
-
-	GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();
-	if (!props) {
-		return false;
-	}
-
-	GlobalSystemMediaTransportControlsSessionTimelineProperties timeline = session.GetTimelineProperties();
-	GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo = session.GetPlaybackInfo();
-
-	if (!timeline || !playbackInfo) {
-		return false;
-	}
-
-	outInfo->HasTrack = true;
-	outInfo->SongDurationTicks = (timeline.EndTime() - timeline.StartTime()).count();
-	outInfo->CurrentPlaybackTimeTicks = timeline.Position().count();
-	outInfo->IsPlaying = playbackInfo.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
-
-	CopyHstringToUtf8(props.Title(), outInfo->SongName, 256);
-	CopyHstringToUtf8(props.Artist(), outInfo->ArtistName, 256);
-	CopyHstringToUtf8(props.AlbumTitle(), outInfo->AlbumName, 256);
-
-	ReadThumbnail(props, outInfo);
-
-	return true;
-}
-
-// `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop
-// retries creating it every poll until it succeeds.
-bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
-{
-	if (outInfo == nullptr)
-		return false;
 
 	outInfo->SongDurationTicks = 0;
 	outInfo->CurrentPlaybackTimeTicks = 0;
@@ -361,28 +293,97 @@ bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager cons
 	}
 
 	try {
-		return GetCurrentTrackInternal(manager, outInfo, possibleMusicSystems, possibleBrowserMediaSources, browserSourcesEnabled);
-	} catch (const winrt::hresult_error &ex) {
+		auto sessions = manager.GetSessions();
+		GlobalSystemMediaTransportControlsSession session = nullptr;
+		uint32_t sessionCount = sessions.Size();
+
+		for (const char *system : possibleMusicSystems) {
+			for (uint32_t i = 0; i < sessionCount; i++) {
+				GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
+				if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
+					session = s;
+					break;
+				}
+			}
+			if (session)
+				break;
+		}
+
+		if (browserSourcesEnabled) {
+			if (!session) {
+				for (const char *system : possibleBrowserMediaSources) {
+					for (uint32_t i = 0; i < sessionCount; i++) {
+						GlobalSystemMediaTransportControlsSession s = sessions.GetAt(i);
+						if (IsStringInsideOtherString(system, s.SourceAppUserModelId())) {
+							session = s;
+							break;
+						}
+					}
+					if (session)
+						break;
+				}
+			}
+		}
+
+		if (!session) {
+			return false;
+		}
+
+		GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();		
+		
+		if (!props) {
+			return false;
+		}
+
+		GlobalSystemMediaTransportControlsSessionTimelineProperties timeline = session.GetTimelineProperties();
+		GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo = session.GetPlaybackInfo();
+		
+		if (!timeline || !playbackInfo) {
+			return false;
+		}
+		
+		outInfo->HasTrack = true;
+		outInfo->SongDurationTicks = (timeline.EndTime() - timeline.StartTime()).count();
+		outInfo->CurrentPlaybackTimeTicks = timeline.Position().count();
+		outInfo->IsPlaying = playbackInfo.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+
+		CopyHstringToUtf8(props.Title(), outInfo->SongName, 256);
+		CopyHstringToUtf8(props.Artist(), outInfo->ArtistName, 256);
+		CopyHstringToUtf8(props.AlbumTitle(), outInfo->AlbumName, 256);
+
+		ReadThumbnail(props, outInfo);
+		
+		return true;
+	} 
+	catch (const winrt::hresult_error &ex) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
 		outInfo->HasTrack = false;
 		return false;
-	} catch (const std::exception &ex) {
+	} 
+	catch (const std::exception &ex) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %s", ex.what());
+		outInfo->HasTrack = false;
+		return false;
+	} 
+	catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: unknown exception");
 		outInfo->HasTrack = false;
 		return false;
 	}
 }
-
-
-std::vector<const char *> kPossibleMusicSystems;
-std::vector<const char *> kPossibleBrowserMediaSources;
 
 static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
 	__try {
 		return GetCurrentTrackNative(manager, outInfo, possibleMusicSystems, possibleBrowserMediaSources, browserSourcesEnabled);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
-		outInfo->HasTrack = false;
+		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) {
+			_resetstkoflw();
+		}
+		if (outInfo) {
+			outInfo->HasTrack = false;
+		}
+		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: unknown exception");
 		return false;
 	}
 }
@@ -1562,7 +1563,7 @@ void InitSourcesLists(spotify_source *ctx)
 
 		if (ctx->musicSystemStrings.empty()) {
 			ctx->kPossibleMusicSystems.assign(std::begin(DEFAULT_MUSIC_SYSTEMS), std::end(DEFAULT_MUSIC_SYSTEMS));
-			blog(LOG_ERROR, "[spotify_now_playing] possiblemusicsystems came back empty, reverting to defaults");
+			blog(LOG_WARNING, "[spotify_now_playing] possiblemusicsystems came back empty, reverting to defaults");
 		} else {
 			ctx->kPossibleMusicSystems.reserve(ctx->musicSystemStrings.size());
 			for (const auto &s : ctx->musicSystemStrings) {
@@ -1572,7 +1573,7 @@ void InitSourcesLists(spotify_source *ctx)
 
 		if (ctx->browserMediaSourceStrings.empty()) {
 			ctx->kPossibleBrowserMediaSources.assign(std::begin(DEFAULT_BROWSER_SOURCES), std::end(DEFAULT_BROWSER_SOURCES));
-			blog(LOG_ERROR, "[spotify_now_playing] possiblebrowsers came back empty, reverting to defaults");
+			blog(LOG_WARNING, "[spotify_now_playing] possiblebrowsers came back empty, reverting to defaults");
 		} else {
 			ctx->kPossibleBrowserMediaSources.reserve(ctx->browserMediaSourceStrings.size());
 			for (const auto &s : ctx->browserMediaSourceStrings) {
@@ -1588,7 +1589,7 @@ void InitSourcesLists(spotify_source *ctx)
 		ctx->kPossibleMusicSystems.assign(std::begin(DEFAULT_MUSIC_SYSTEMS), std::end(DEFAULT_MUSIC_SYSTEMS));
 		ctx->kPossibleBrowserMediaSources.assign(std::begin(DEFAULT_BROWSER_SOURCES), std::end(DEFAULT_BROWSER_SOURCES));
 
-		blog(LOG_ERROR, "[spotify_now_playing] Unknown error reading in music or browser systems, reverting to defaults");
+		blog(LOG_WARNING, "[spotify_now_playing] Unknown error reading in music or browser systems, reverting to defaults");
 	}
 
 	for (const char *system : ctx->kPossibleMusicSystems) {
@@ -1715,7 +1716,7 @@ static bool export_settings_modified(obs_properties_t *, obs_property_t *, obs_d
 		obs_data_t *out = obs_data_create();
 		export_known_settings(settings, out);
 		if (!obs_data_save_json_pretty_safe(out, fixed_path.array, "tmp", "bak")) {
-			blog(LOG_WARNING, "[spotify_now_playing] Failed to export settings to %s", fixed_path.array);
+			blog(LOG_ERROR, "[spotify_now_playing] Failed to export settings to %s", fixed_path.array);
 		}
 		obs_data_release(out);
 
@@ -1735,7 +1736,7 @@ static bool import_settings_modified(obs_properties_t *, obs_property_t *, obs_d
 			import_known_settings(imported, settings);
 			obs_data_release(imported);
 		} else {
-			blog(LOG_WARNING, "[spotify_now_playing] Failed to import settings from %s", path);
+			blog(LOG_ERROR, "[spotify_now_playing] Failed to import settings from %s", path);
 		}
 
 		obs_data_set_string(settings, "import_settings_path", "");
