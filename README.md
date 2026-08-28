@@ -5,6 +5,7 @@ https://www.twitch.tv/lingeriegoat
 [<img width="600" height="225" alt="image" src="https://github.com/user-attachments/assets/a7cb5155-84c2-467d-8ad1-d9e2e48af65d" />](https://www.twitch.tv/lingeriegoat)
 
 
+
 # NowPlaying Widget for OBS
 
 <img width="1073" height="1815" alt="image" src="https://github.com/user-attachments/assets/bef53d1a-0d2b-4927-ae2f-c2f2dd30fbd4" />
@@ -12,8 +13,6 @@ https://www.twitch.tv/lingeriegoat
 Vertical layout enabled:
 
 <img width="439" height="605" alt="image" src="https://github.com/user-attachments/assets/b3856bcb-d0b8-4714-8e75-7de41b475d8f" />
-
-
 
 This plugin allows you to have a native "now playing" widget inside of OBS. No need for additional programs, web servers, browser sources, text files, or any of that stuff. Everything runs entirely inside of OBS and it automatically detects the music your playing from any supported sources.
 
@@ -23,6 +22,9 @@ As of version 2.2, we now support browsers as media sources. This option default
 
 More services may be added later if they are requested and I can reasonably get a copy of the program.
 
+
+
+
 # How to use
 
 ### Release 1.8 and up
@@ -30,6 +32,8 @@ More services may be added later if they are requested and I can reasonably get 
 Download the latest release from the releases page. Unzip into the root of your OBS directory (usually something like `C:\Program Files\obs-studio\`). Launch OBS and add a new source, choose the new option called Now Playing Widget. Configure the settings using the built in options.
 
 <img width="1037" height="414" alt="obsplugininstallinstructions" src="https://github.com/user-attachments/assets/2b5765cf-1afe-4489-970a-1a52e7b46357" />
+
+
 
 
 ### Release 1.7 and prior
@@ -46,8 +50,9 @@ Mac and linux support are infeasible as this plugin relies on a windows subsyste
 
 
 
-# Troubleshooting
 
+
+# Troubleshooting
 
 ### How do I use the image background?
 
@@ -67,11 +72,15 @@ Example 380x100 card and its 380x100 image background:
 
 
 
+
+
 ### Im using spotify and the plugin isnt detecting any music!
 
 In spotify, make sure you have enabled the "Show desktop overlay when using media keys" option. There seems to be a bug in spotify that when this is disabled, spotify stops sending data to windows SMTC, which is what we scrape from. If you really need this option disabled, please file a bug with spotify to have this fix.
 
 <img width="933" height="177" alt="image" src="https://github.com/user-attachments/assets/13c36a34-1730-4b71-9f6f-a12ec56532a0" />
+
+
 
 
 
@@ -90,9 +99,45 @@ meaning that Opera will be chosen before Chrome.
 Browsers will ONLY be considered a valid candidate if you have the option enabled, and ONLY if no "traditional" music source is found first (spotify desktop, youtube music desktop, etc).
 
 
+
+
+
+### I am using this program to play music, can you add support for it?
+### I dont like the priority you have chosen for sources! I want my preferred program to be the highest priority!
+
+Both the possible music sources and the ordering of priority of said sources can now be directly configured by the user, by editing 2 simple flat files found in the plugins data directory.
+
+Once the plugin is installed, the source lists can be found in `<obs root install>/data/obs-plugins/obs-spotify-overlay-plugin/media-sources-browser.txt` and `<obs root install>/data/obs-plugins/obs-spotify-overlay-plugin/media-sources-music.txt`
+
+Follow the format of the files and put any new source on its own line. Blank lines will be ignored.
+
+These source lists work the same way as the internal list did, where it is a ranked choice, top to botton, meaning that if `youtube` appears in the file before `spotify`, `youtube` will have priority when the plugin searches for a source, and if no youtube source is found, it will then check for `spotify`.
+
+They sources are case insensitive, everything is converted to lowercase before being checked.
+
+Browser sources will ONLY be checked if you have the "Enable browser media sources?" option enabled in the plugin. They are checked after traditional music sources. `308046B0AF4A39CB` in the browser sources is firefox, see [http://bugzilla.mozilla.org/show_bug.cgi?id=2065866](https://bugzilla.mozilla.org/show_bug.cgi?id=2065866)
+
+If you want to add your own source but are having trouble finding a name that machines, you can run this program: https://github.com/lingeriegoat/SpotifyDLLTest while the source is actively playing media, and it will show you the name in the top section, above the track information.
+
+<img width="419" height="284" alt="image" src="https://github.com/user-attachments/assets/bd4852aa-e849-4b95-a6d2-cd1558b1777d" />
+
+The plugin does "fuzzy" matching, so `youtube` is enough here to catch `com.github.th-ch.youtube-music`
+
+If you make a mistake, or delete the files, or otherwise make the files inaccessible, the plugin will fall back to the existing internal lists it uses today. You can check the log files for error messages to help troubleshoot any problems you might encounter with this feature.
+
+These files are used INSTEAD OF the internal list, so do not delete entries in the files unless you are absolutely sure you will never want to use that program as a source.
+
+
+
+
+
 ### The Artist text is very small
 
 If you had an older version of the plugin, the font has probably defaulted now that it can be changed separately. Simply open the options and select a new font. The old default was -2px smaller than whatever the Title font is, and "Regular" weight (ie, not bold or italic).
+
+
+
+
 
 ### I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
@@ -114,6 +159,8 @@ The other possibility is that you are using an unsupported music source. If this
 
 
 
+
+
 ### The plugin is not loading at all!
 
 The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, select "Properties", select "Unblock", and then press apply.
@@ -122,9 +169,13 @@ If you dont see the DLL there at all, then microsoft defender or some other anti
 
 
 
+
+
 ### None of this helps me!
 
 Please create an issue here on github or a post on the OBS forums thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing the problem with as much detail as possible, I will try to help you.
+
+
 
 
 
