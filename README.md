@@ -102,9 +102,9 @@ Browsers will ONLY be considered a valid candidate if you have the option enable
 
 
 
-## I am using this program to play music, can you add support for it?
+## I am using [some program] to play music, can you add support for it?
 
-If it supports sending data to SMTC (press win+A, and if your program appears there in the windows player, it is compatible), you can now do this yourself! See below.
+If it supports sending data to SMTC (press win+A, and if your program appears in the media panel, it is compatible), you can now do this yourself! See below.
 
 If your program does not support sending data to Windows SMTC, you will need to ask the developer of that program to add support.
 
@@ -113,7 +113,7 @@ If your program does not support sending data to Windows SMTC, you will need to 
 
 ## I dont like the priority you have chosen for sources! I want my preferred program to be the highest priority!
 
-Both the possible music sources and the ordering of priority of said sources can now be directly configured by the user, by editing 2 simple flat files found in the plugins data directory.
+Both the possible music sources and the priority ordering of said sources can now be directly configured by the user, by editing 2 simple flat files found in the plugins data directory.
 
 Once the plugin is installed, the source lists can be found in `<obs root install>/data/obs-plugins/obs-spotify-overlay-plugin/media-sources-browser.txt` and `<obs root install>/data/obs-plugins/obs-spotify-overlay-plugin/media-sources-music.txt`
 
