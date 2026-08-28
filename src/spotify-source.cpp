@@ -80,6 +80,9 @@ constexpr int DEFAULT_COLOR_WHITE = 0xFFFFFFFF;
 constexpr int DEFAULT_COLOR_BLACK = 0x00000000;
 constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
 constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
+constexpr int DEFAULT_COLOR_OPAQUE_BLACK = 0xFF000000;
+
+constexpr int DEFAULT_TEXT_OUTLINE_SIZE_PX = 2;
 
 constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
@@ -100,8 +103,12 @@ constexpr bool DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES = false;
 
 //"308046B0AF4A39CB" is firefox, this will hopefully be fixed in the future
 //https://bugzilla.mozilla.org/show_bug.cgi?id=2065866
-const char *const DEFAULT_MUSIC_SYSTEMS[] = { "spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",};
-const char *const DEFAULT_BROWSER_SOURCES[] = { "operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome", };
+const char *const DEFAULT_MUSIC_SYSTEMS[] = {
+	"spotify", "youtube", "ytm", "pear", "applemusic", "cider", "focal", "vlc",
+};
+const char *const DEFAULT_BROWSER_SOURCES[] = {
+	"operagx", "opera", "brave", "safari", "msedge", "explorer", "firefox", "308046B0AF4A39CB", "chrome",
+};
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -270,7 +277,6 @@ void ReadThumbnail(const GlobalSystemMediaTransportControlsSessionMediaPropertie
 	outInfo->ImageLength = (int)size;
 }
 
-
 // `manager` may be null if RequestAsync() hasn't succeeded yet -- poll_loop retries creating it every poll until it succeeds.
 static bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManager const &manager, NativeMediaInfo *outInfo, const std::vector<const char *> &possibleMusicSystems, const std::vector<const char *> &possibleBrowserMediaSources, bool browserSourcesEnabled)
 {
@@ -329,19 +335,19 @@ static bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManag
 			return false;
 		}
 
-		GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();		
-		
+		GlobalSystemMediaTransportControlsSessionMediaProperties props = session.TryGetMediaPropertiesAsync().get();
+
 		if (!props) {
 			return false;
 		}
 
 		GlobalSystemMediaTransportControlsSessionTimelineProperties timeline = session.GetTimelineProperties();
 		GlobalSystemMediaTransportControlsSessionPlaybackInfo playbackInfo = session.GetPlaybackInfo();
-		
+
 		if (!timeline || !playbackInfo) {
 			return false;
 		}
-		
+
 		outInfo->HasTrack = true;
 		outInfo->SongDurationTicks = (timeline.EndTime() - timeline.StartTime()).count();
 		outInfo->CurrentPlaybackTimeTicks = timeline.Position().count();
@@ -352,20 +358,17 @@ static bool GetCurrentTrackNative(GlobalSystemMediaTransportControlsSessionManag
 		CopyHstringToUtf8(props.AlbumTitle(), outInfo->AlbumName, 256);
 
 		ReadThumbnail(props, outInfo);
-		
+
 		return true;
-	} 
-	catch (const winrt::hresult_error &ex) {
+	} catch (const winrt::hresult_error &ex) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %ls", ex.message().c_str());
 		outInfo->HasTrack = false;
 		return false;
-	} 
-	catch (const std::exception &ex) {
+	} catch (const std::exception &ex) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: %s", ex.what());
 		outInfo->HasTrack = false;
 		return false;
-	} 
-	catch (...) {
+	} catch (...) {
 		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: unknown exception");
 		outInfo->HasTrack = false;
 		return false;
@@ -448,7 +451,36 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
+
+void PaintTextRun(Graphics &g, const std::wstring &text, Font &font, Brush &fillBrush, const RectF &layoutRect, StringFormat &sf, bool outlineEnabled, float outlineWidthPx, const Color &outlineColor)
+{
+	if (!outlineEnabled || outlineWidthPx <= 0.0f) {
+		g.DrawString(text.c_str(), -1, &font, layoutRect, &sf, &fillBrush);
+		return;
+	}
+
+	FontFamily fam;
+	font.GetFamily(&fam);
+
+	GraphicsPath path;
+	path.SetFillMode(FillModeWinding); 
+	path.AddString(text.c_str(), -1, &fam, font.GetStyle(), font.GetSize(), layoutRect, &sf);
+
+	Pen outlinePen(outlineColor, outlineWidthPx * 2.0f);
+	outlinePen.SetLineJoin(LineJoinRound);
+	outlinePen.SetStartCap(LineCapRound);
+	outlinePen.SetEndCap(LineCapRound);
+
+	SmoothingMode prevSmoothing = g.GetSmoothingMode();
+	g.SetSmoothingMode(SmoothingModeAntiAlias);
+
+	g.DrawPath(&outlinePen, &path);
+	g.FillPath(&fillBrush, &path);
+
+	g.SetSmoothingMode(prevSmoothing);
+}
+
+void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool outlineEnabled, float outlineWidthPx, const Color &outlineColor, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
 {
 	*outNeedsScroll = false;
 	*outMaxOffsetPx = 0.0;
@@ -468,7 +500,7 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 		if (centerWhenStatic)
 			sf.SetAlignment(StringAlignmentCenter);
 		sf.SetTrimming(StringTrimmingEllipsisCharacter); // safety net
-		g.DrawString(text.c_str(), -1, &font, bounds, &sf, &brush);
+		PaintTextRun(g, text, font, brush, bounds, sf, outlineEnabled, outlineWidthPx, outlineColor);
 		return;
 	}
 
@@ -485,7 +517,7 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	r.X -= (REAL)offset;
 	r.Width = measured.Width + 4.0f; // wide enough for the full text
 
-	g.DrawString(text.c_str(), -1, &font, r, &sf, &brush);
+	PaintTextRun(g, text, font, brush, r, sf, outlineEnabled, outlineWidthPx, outlineColor);
 
 	g.SetClip(&savedClip);
 }
@@ -555,6 +587,12 @@ struct spotify_source {
 	std::mutex settings_mutex;
 	long long title_color = DEFAULT_COLOR_WHITE;
 	long long artist_color = DEFAULT_COLOR_WHITE;
+	bool title_outline_enabled = false;
+	int title_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
+	long long title_outline_color = DEFAULT_COLOR_OPAQUE_BLACK;
+	bool artist_outline_enabled = false;
+	int artist_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
+	long long artist_outline_color = DEFAULT_COLOR_OPAQUE_BLACK;
 	long long bg_color = 0;
 	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
 	bool use_bg_image = false;
@@ -710,6 +748,12 @@ struct AppearanceSettings {
 	bool autohide_enabled;
 	int autohide_after_s;
 	bool autohide_when_not_playing;
+	bool title_outline_enabled;
+	int title_outline_size;
+	long long title_outline_color;
+	bool artist_outline_enabled;
+	int artist_outline_size;
+	long long artist_outline_color;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -972,6 +1016,9 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	SolidBrush titleBrush(titleColor);
 	SolidBrush artistBrush(artistColor);
 
+	Color titleOutlineColor = ObsColorToGdip(s.title_outline_color);
+	Color artistOutlineColor = ObsColorToGdip(s.artist_outline_color);
+
 	int titleLineH = titleSize + 10;
 	int artistLineH = artistSize + 8;
 	int progressH = s.show_progress_bar ? (s.progress_bar_gap + s.progress_bar_height) : 0;
@@ -1117,8 +1164,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
 	double titleMaxOffset = ctx->title_scroll_max_px, artistMaxOffset = ctx->artist_scroll_max_px;
-	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, &titleScroll, &titleAvgChar, &titleMaxOffset);
-	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText, &artistScroll, &artistAvgChar, &artistMaxOffset);
+	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, s.title_outline_enabled, (float)s.title_outline_size, titleOutlineColor, &titleScroll, &titleAvgChar, &titleMaxOffset);
+	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText, s.artist_outline_enabled, (float)s.artist_outline_size, artistOutlineColor, &artistScroll, &artistAvgChar, &artistMaxOffset);
 	ctx->title_needs_scroll = titleScroll;
 	ctx->artist_needs_scroll = artistScroll;
 	ctx->title_avg_char_px = titleAvgChar;
@@ -1157,52 +1204,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings
-	{
-		ctx->title_color, 
-		ctx->artist_color, 
-		ctx->bg_color, 
-		ctx->bg_opacity, 
-		ctx->use_bg_image, 
-		ctx->bg_image_path, 
-		ctx->background_corner_radius, 
-		ctx->album_art_corner_radius, 
-		ctx->title_font_face, 
-		ctx->title_font_style, 
-		ctx->title_font_size, 
-		ctx->title_font_flags, 
-		ctx->artist_font_face, 
-		ctx->artist_font_style, 
-		ctx->artist_font_size, 
-		ctx->artist_font_flags, 
-		ctx->card_w, 
-		ctx->card_h, 
-		ctx->text_offset_y, 
-		ctx->progress_bar_gap, 
-		ctx->progress_bar_height, 
-		ctx->scroll_speed_ms, 
-		ctx->browser_media_source_enabled, 
-		ctx->vu_meter_enabled, 
-		ctx->vu_color, 
-		ctx->vu_update_ms, 
-		ctx->vu_randomness, 
-		ctx->vu_width, 
-		ctx->vu_height, 
-		ctx->vu_bar_count, 
-		ctx->vu_horizontal, 
-		ctx->vertical_layout, 
-		ctx->show_album_name, 
-		ctx->show_goat_placeholder, 
-		ctx->show_plugin_attribution, 
-		ctx->hide_album_art, 
-		ctx->show_progress_bar, 
-		ctx->progress_fill_color, 
-		ctx->progress_bg_color, 
-		ctx->track_change_animation_enabled, 
-		ctx->autohide_enabled, 
-		ctx->autohide_after_s, 
-		ctx->autohide_when_not_playing
-	};
+	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color};
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
@@ -1638,16 +1640,11 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", 
-	"card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", 
-	"vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", 
-	"progress_bg_color", "autohide_after_s",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", 
-	"show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", 
-	"autohide_when_not_playing",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing", "title_outline_enabled", "artist_outline_enabled",
 };
 
 static const char *const kSettingsStringKeys[] = {
@@ -1749,6 +1746,17 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
 	ctx->title_color = obs_data_get_int(settings, "title_color");
 	ctx->artist_color = obs_data_get_int(settings, "artist_color");
+
+	ctx->title_outline_enabled = obs_data_get_bool(settings, "title_outline_enabled");
+	ctx->title_outline_size = (int)obs_data_get_int(settings, "title_outline_size");
+	ctx->title_outline_size = std::clamp(ctx->title_outline_size, 1, 50);
+	ctx->title_outline_color = obs_data_get_int(settings, "title_outline_color");
+
+	ctx->artist_outline_enabled = obs_data_get_bool(settings, "artist_outline_enabled");
+	ctx->artist_outline_size = (int)obs_data_get_int(settings, "artist_outline_size");
+	ctx->artist_outline_size = std::clamp(ctx->artist_outline_size, 1, 50);
+	ctx->artist_outline_color = obs_data_get_int(settings, "artist_outline_color");
+
 	ctx->bg_color = obs_data_get_int(settings, "bg_color");
 
 	ctx->bg_opacity = (int)obs_data_get_int(settings, "bg_opacity");
@@ -1864,6 +1872,14 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "title_color", DEFAULT_COLOR_WHITE);
 	obs_data_set_default_int(settings, "artist_color", DEFAULT_COLOR_WHITE);
 
+	obs_data_set_default_bool(settings, "title_outline_enabled", false);
+	obs_data_set_default_int(settings, "title_outline_size", DEFAULT_TEXT_OUTLINE_SIZE_PX);
+	obs_data_set_default_int(settings, "title_outline_color", DEFAULT_COLOR_OPAQUE_BLACK);
+
+	obs_data_set_default_bool(settings, "artist_outline_enabled", false);
+	obs_data_set_default_int(settings, "artist_outline_size", DEFAULT_TEXT_OUTLINE_SIZE_PX);
+	obs_data_set_default_int(settings, "artist_outline_color", DEFAULT_COLOR_OPAQUE_BLACK);
+
 	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
 	obs_data_set_default_string(settings, "export_settings_path", "");
@@ -1932,6 +1948,22 @@ static bool autohide_enabled_modified(obs_properties_t *props, obs_property_t *,
 	return true;
 }
 
+static bool title_outline_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "title_outline_enabled");
+	obs_property_set_enabled(obs_properties_get(props, "title_outline_size"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "title_outline_color"), enabled);
+	return true;
+}
+
+static bool artist_outline_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "artist_outline_enabled");
+	obs_property_set_enabled(obs_properties_get(props, "artist_outline_size"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "artist_outline_color"), enabled);
+	return true;
+}
+
 static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
 	bool enabled = obs_data_get_bool(settings, "use_bg_image");
@@ -1941,7 +1973,6 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 	obs_property_set_enabled(bg_color_prop, !enabled);
 	return true;
 }
-
 
 static obs_properties_t *spotify_source_properties(void *)
 {
@@ -1956,6 +1987,17 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_property_set_modified_callback(autohide_prop, autohide_enabled_modified);
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
+
+	obs_property_t *title_outline_enabled_prop = obs_properties_add_bool(props, "title_outline_enabled", obs_module_text("TitleOutlineEnabled"));
+	obs_properties_add_int(props, "title_outline_size", obs_module_text("TitleOutlineSize"), 1, 50, 1);
+	obs_properties_add_color_alpha(props, "title_outline_color", obs_module_text("TitleOutlineColor"));
+	obs_property_set_modified_callback(title_outline_enabled_prop, title_outline_enabled_modified);
+
+	obs_property_t *artist_outline_enabled_prop = obs_properties_add_bool(props, "artist_outline_enabled", obs_module_text("ArtistOutlineEnabled"));
+	obs_properties_add_int(props, "artist_outline_size", obs_module_text("ArtistOutlineSize"), 1, 50, 1);
+	obs_properties_add_color_alpha(props, "artist_outline_color", obs_module_text("ArtistOutlineColor"));
+	obs_property_set_modified_callback(artist_outline_enabled_prop, artist_outline_enabled_modified);
+
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
 	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
 	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
@@ -1996,7 +2038,6 @@ static obs_properties_t *spotify_source_properties(void *)
 	//apparently globals are shared between ALL instances of a plugin. Weird.
 	obs_property_t *enable_browser_prop = obs_properties_add_bool(props, "enable_browser_media", obs_module_text("EnableBrowserMedia"));
 	obs_properties_add_text(props, "enable_browser_media_warning", obs_module_text("EnableBrowserMediaWarning"), OBS_TEXT_INFO);
-
 
 	return props;
 }
