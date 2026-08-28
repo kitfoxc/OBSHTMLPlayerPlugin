@@ -24,10 +24,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <util/bmem.h>
 
 #define NOMINMAX
+#define GDIPVER 0x0110 // pull in GDI+ 1.1 (Blur/effects, Bitmap::ApplyEffect) -- default is 1.0 and compiles them out
 #include <windows.h>
 #include <objbase.h>
 #include <shlwapi.h>
 #include <gdiplus.h>
+#include <GdiplusEffects.h>
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -81,6 +83,7 @@ constexpr int DEFAULT_COLOR_BLACK = 0x00000000;
 constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
 constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
 constexpr int DEFAULT_COLOR_OPAQUE_BLACK = 0xFF000000;
+constexpr int DEFAULT_ALBUM_ART_BG_BLUR_PCT = 50;
 
 constexpr int DEFAULT_TEXT_OUTLINE_SIZE_PX = 2;
 
@@ -451,7 +454,6 @@ FontStyle ParseFontStyle(const std::string &style, int flags)
 	return FontStyleRegular;
 }
 
-
 void PaintTextRun(Graphics &g, const std::wstring &text, Font &font, Brush &fillBrush, const RectF &layoutRect, StringFormat &sf, bool outlineEnabled, float outlineWidthPx, const Color &outlineColor)
 {
 	if (!outlineEnabled || outlineWidthPx <= 0.0f) {
@@ -597,6 +599,8 @@ struct spotify_source {
 	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
 	bool use_bg_image = false;
 	std::string bg_image_path;
+	bool use_album_art_as_bg = false;
+	int album_art_bg_blur_pct = DEFAULT_ALBUM_ART_BG_BLUR_PCT;
 	int background_corner_radius = DEFAULT_BACKGROUND_CORNER_RADIUS;
 	int album_art_corner_radius = DEFAULT_ALBUM_ART_CORNER_RADIUS;
 	std::string title_font_face = "Segoe UI";
@@ -711,6 +715,8 @@ struct AppearanceSettings {
 	int bg_opacity;
 	bool use_bg_image;
 	std::string bg_image_path;
+	bool use_album_art_as_bg;
+	int album_art_bg_blur_pct;
 	int background_corner_radius;
 	int album_art_corner_radius;
 	std::string title_font_face;
@@ -949,6 +955,75 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	ctx->last_art_bytes.assign(image_data, image_data + image_len);
 }
 
+// Draws album art as a full-bleed background: uniformly scaled so its width matches
+// the card (preserving aspect ratio), vertically centered with any excess height
+// cropped off top/bottom -- i.e. CSS's "background-size: 100% auto; background-
+// position: center" with overflow hidden. When blurPct > 0, the cropped region is
+// rendered to an offscreen bitmap and blurred in place with GDI+'s Blur effect
+// (GDI+ 1.1, GdiplusEffects.h) before being composited onto the card.
+// `clipPath` should already be the card's rounded-rect region. Only reads from `art`
+// (the same Image already cached for the foreground thumbnail) -- never mutates it,
+// so the separately-drawn foreground album art is unaffected.
+static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPath, int cardW, int cardH, int blurPct, int opacityPercent)
+{
+	if (!art)
+		return;
+
+	UINT imgW = art->GetWidth();
+	UINT imgH = art->GetHeight();
+	if (imgW == 0 || imgH == 0 || cardW <= 0 || cardH <= 0)
+		return;
+
+	// Source crop: full width, and whatever vertical slice -- centered -- maps to
+	// the card's height once the image is scaled so its width fills cardW.
+	REAL srcW = (REAL)imgW;
+	REAL srcCropH = (REAL)cardH * (REAL)imgW / (REAL)cardW;
+	if (srcCropH > (REAL)imgH)
+		srcCropH = (REAL)imgH; // image isn't tall enough to fully cover; use all of it
+	REAL srcY = ((REAL)imgH - srcCropH) / 2.0f;
+
+	ImageAttributes attr;
+	if (opacityPercent < 100) {
+		REAL a = std::clamp(opacityPercent, 0, 100) / 100.0f;
+		Gdiplus::ColorMatrix cm = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, a, 0, 0, 0, 0, 0, 1};
+		attr.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+	}
+
+	Region savedClip;
+	g.GetClip(&savedClip);
+	g.SetClip(&clipPath);
+
+	RectF destRect(0.0f, 0.0f, (REAL)cardW, (REAL)cardH);
+	int pct = std::clamp(blurPct, 0, 100);
+
+	bool blurred = false;
+	if (pct > 0) {
+		// Render the cropped region at full card resolution into an offscreen bitmap,
+		// then blur it in place with GDI+'s Blur effect (GDI+ 1.1, GdiplusEffects.h)
+		// before compositing. This never touches `art` itself.
+		Bitmap cropped(cardW, cardH, PixelFormat32bppARGB);
+		Graphics gc(&cropped);
+		gc.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+		gc.SetSmoothingMode(SmoothingModeHighQuality);
+		gc.Clear(Color(0, 0, 0, 0));
+		gc.DrawImage(art, destRect, 0.0f, srcY, srcW, srcCropH, UnitPixel, nullptr);
+
+		Gdiplus::Blur blurEffect;
+		Gdiplus::BlurParams blurParams = {(pct / 100.0f) * 40.0f, FALSE}; // 0-100% -> ~0-40px radius
+		if (blurEffect.SetParameters(&blurParams) == Ok && cropped.ApplyEffect(&blurEffect, nullptr) == Ok) {
+			g.DrawImage(&cropped, destRect, 0.0f, 0.0f, (REAL)cardW, (REAL)cardH, UnitPixel, &attr);
+			blurred = true;
+		}
+		// else: effect unavailable on this system -- fall through and draw crisp below
+		// rather than showing nothing.
+	}
+
+	if (!blurred)
+		g.DrawImage(art, destRect, 0.0f, srcY, srcW, srcCropH, UnitPixel, &attr);
+
+	g.SetClip(&savedClip);
+}
+
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
 {
 	const int cardW = std::max(s.card_w, 50);
@@ -972,37 +1047,41 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	AddRoundedRect(bgPath, Rect(0, 0, cardW, cardH), s.background_corner_radius);
 
 	Image *bgImage = nullptr;
-	if (s.use_bg_image) {
-		if (!ctx->cached_bg_image || settings_changed)
-			bgImage = EnsureBackgroundImage(ctx, s.bg_image_path);
-		else
-			bgImage = ctx->cached_bg_image.get();
-	}
-	if (bgImage) {
-		Region savedBgClip;
-		g.GetClip(&savedBgClip);
-		g.SetClip(&bgPath);
-
-		UINT imgW = bgImage->GetWidth();
-		UINT imgH = bgImage->GetHeight();
-		REAL srcW = (REAL)std::min<UINT>(imgW, (UINT)cardW);
-		REAL srcH = (REAL)std::min<UINT>(imgH, (UINT)cardH);
-
-		ImageAttributes bgAttr;
-		if (s.bg_opacity < 100) {
-			REAL a = std::clamp(s.bg_opacity, 0, 100) / 100.0f;
-			Gdiplus::ColorMatrix cm = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, a, 0, 0, 0, 0, 0, 1};
-			bgAttr.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
-		}
-
-		// Draw the top-left crop of the source image 1:1 (no scaling) into the card
-		RectF bgDestRect(0.0f, 0.0f, srcW, srcH);
-		g.DrawImage(bgImage, bgDestRect, 0.0f, 0.0f, srcW, srcH, UnitPixel, &bgAttr);
-
-		g.SetClip(&savedBgClip);
+	if (s.use_album_art_as_bg && ctx->cached_art_image) {
+		DrawAlbumArtBackground(g, ctx->cached_art_image.get(), bgPath, cardW, cardH, s.album_art_bg_blur_pct, s.bg_opacity);
 	} else {
-		SolidBrush bgBrush(ObsColorToGdipWithAlpha(s.bg_color, s.bg_opacity));
-		g.FillPath(&bgBrush, &bgPath);
+		if (s.use_bg_image) {
+			if (!ctx->cached_bg_image || settings_changed)
+				bgImage = EnsureBackgroundImage(ctx, s.bg_image_path);
+			else
+				bgImage = ctx->cached_bg_image.get();
+		}
+		if (bgImage) {
+			Region savedBgClip;
+			g.GetClip(&savedBgClip);
+			g.SetClip(&bgPath);
+
+			UINT imgW = bgImage->GetWidth();
+			UINT imgH = bgImage->GetHeight();
+			REAL srcW = (REAL)std::min<UINT>(imgW, (UINT)cardW);
+			REAL srcH = (REAL)std::min<UINT>(imgH, (UINT)cardH);
+
+			ImageAttributes bgAttr;
+			if (s.bg_opacity < 100) {
+				REAL a = std::clamp(s.bg_opacity, 0, 100) / 100.0f;
+				Gdiplus::ColorMatrix cm = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, a, 0, 0, 0, 0, 0, 1};
+				bgAttr.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+			}
+
+			// Draw the top-left crop of the source image 1:1 (no scaling) into the card
+			RectF bgDestRect(0.0f, 0.0f, srcW, srcH);
+			g.DrawImage(bgImage, bgDestRect, 0.0f, 0.0f, srcW, srcH, UnitPixel, &bgAttr);
+
+			g.SetClip(&savedBgClip);
+		} else {
+			SolidBrush bgBrush(ObsColorToGdipWithAlpha(s.bg_color, s.bg_opacity));
+			g.FillPath(&bgBrush, &bgPath);
+		}
 	}
 
 	int titleSize = s.title_font_size > 0 ? s.title_font_size : DEFAULT_TITLE_FONT_SIZE;
@@ -1204,7 +1283,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color};
+	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->use_album_art_as_bg, ctx->album_art_bg_blur_pct, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color};
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
@@ -1640,11 +1719,11 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing", "title_outline_enabled", "artist_outline_enabled",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing", "title_outline_enabled", "artist_outline_enabled", "use_album_art_as_bg",
 };
 
 static const char *const kSettingsStringKeys[] = {
@@ -1765,6 +1844,10 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->use_bg_image = obs_data_get_bool(settings, "use_bg_image");
 	const char *bg_image_path = obs_data_get_string(settings, "bg_image_path");
 	ctx->bg_image_path = bg_image_path ? bg_image_path : "";
+
+	ctx->use_album_art_as_bg = obs_data_get_bool(settings, "use_album_art_as_bg");
+	ctx->album_art_bg_blur_pct = (int)obs_data_get_int(settings, "album_art_bg_blur");
+	ctx->album_art_bg_blur_pct = std::clamp(ctx->album_art_bg_blur_pct, 0, 100);
 
 	ctx->background_corner_radius = (int)obs_data_get_int(settings, "background_corner_radius");
 	ctx->background_corner_radius = std::clamp(ctx->background_corner_radius, 0, 100);
@@ -1887,6 +1970,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "use_bg_image", false);
 	obs_data_set_default_string(settings, "bg_image_path", "");
+	obs_data_set_default_bool(settings, "use_album_art_as_bg", false);
+	obs_data_set_default_int(settings, "album_art_bg_blur", DEFAULT_ALBUM_ART_BG_BLUR_PCT);
 	obs_data_set_default_int(settings, "background_corner_radius", DEFAULT_BACKGROUND_CORNER_RADIUS);
 	obs_data_set_default_int(settings, "album_art_corner_radius", DEFAULT_ALBUM_ART_CORNER_RADIUS);
 
@@ -1966,11 +2051,26 @@ static bool artist_outline_enabled_modified(obs_properties_t *props, obs_propert
 
 static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
+	bool useArt = obs_data_get_bool(settings, "use_album_art_as_bg");
 	bool enabled = obs_data_get_bool(settings, "use_bg_image");
 	obs_property_t *path_prop = obs_properties_get(props, "bg_image_path");
 	obs_property_t *bg_color_prop = obs_properties_get(props, "bg_color");
-	obs_property_set_enabled(path_prop, enabled);
-	obs_property_set_enabled(bg_color_prop, !enabled);
+	obs_property_set_enabled(path_prop, enabled && !useArt);
+	obs_property_set_enabled(bg_color_prop, !enabled && !useArt);
+	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
+	return true;
+}
+
+static bool use_album_art_as_bg_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool useArt = obs_data_get_bool(settings, "use_album_art_as_bg");
+	bool useImg = obs_data_get_bool(settings, "use_bg_image");
+	obs_property_set_enabled(obs_properties_get(props, "album_art_bg_blur"), useArt);
+	// Album art background takes priority when enabled (see compose_bitmap), so grey
+	// out the other background controls to make that priority visible in the UI.
+	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
+	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), !useArt && useImg);
+	obs_property_set_enabled(obs_properties_get(props, "bg_color"), !useArt && !useImg);
 	return true;
 }
 
@@ -1997,11 +2097,13 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "artist_outline_size", obs_module_text("ArtistOutlineSize"), 1, 50, 1);
 	obs_properties_add_color_alpha(props, "artist_outline_color", obs_module_text("ArtistOutlineColor"));
 	obs_property_set_modified_callback(artist_outline_enabled_prop, artist_outline_enabled_modified);
-
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
 	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
 	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
 	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
+	obs_property_t *use_album_art_as_bg_prop = obs_properties_add_bool(props, "use_album_art_as_bg", obs_module_text("UseAlbumArtAsBackground"));
+	obs_properties_add_int(props, "album_art_bg_blur", obs_module_text("AlbumArtBackgroundBlur"), 0, 100, 1);
+	obs_property_set_modified_callback(use_album_art_as_bg_prop, use_album_art_as_bg_modified);
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
