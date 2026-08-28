@@ -102,7 +102,7 @@ Browsers will ONLY be considered a valid candidate if you have the option enable
 
 
 
-## I am using this program to play music, can you add support for it?
+### I am using this program to play music, can you add support for it?
 ## I dont like the priority you have chosen for sources! I want my preferred program to be the highest priority!
 
 Both the possible music sources and the ordering of priority of said sources can now be directly configured by the user, by editing 2 simple flat files found in the plugins data directory.
