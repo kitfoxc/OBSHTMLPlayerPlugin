@@ -54,7 +54,7 @@ Mac and linux support are infeasible as this plugin relies on a windows subsyste
 
 # Troubleshooting
 
-### How do I use the image background?
+## How do I use the image background?
 
 The "image background" option will crop your image to the size of the widgets card, starting at the top left. So for example if your image is 600x600, and your card is 300x300, you will get the top left 1/4 of your image as the background.
 
@@ -74,7 +74,7 @@ Example 380x100 card and its 380x100 image background:
 
 
 
-### Im using spotify and the plugin isnt detecting any music!
+## Im using spotify and the plugin isnt detecting any music!
 
 In spotify, make sure you have enabled the "Show desktop overlay when using media keys" option. There seems to be a bug in spotify that when this is disabled, spotify stops sending data to windows SMTC, which is what we scrape from. If you really need this option disabled, please file a bug with spotify to have this fix.
 
@@ -84,7 +84,7 @@ In spotify, make sure you have enabled the "Show desktop overlay when using medi
 
 
 
-### I want to play spotify or youtube music from my browser, will this work?
+## I want to play spotify or youtube music from my browser, will this work?
 
 Yes. You need to enable the option "Enable Browser Media Sources?". Please read the warning very carefully, as its very easy to leak embarrassing information into your stream.
 
@@ -102,8 +102,8 @@ Browsers will ONLY be considered a valid candidate if you have the option enable
 
 
 
-### I am using this program to play music, can you add support for it?
-### I dont like the priority you have chosen for sources! I want my preferred program to be the highest priority!
+## I am using this program to play music, can you add support for it?
+## I dont like the priority you have chosen for sources! I want my preferred program to be the highest priority!
 
 Both the possible music sources and the ordering of priority of said sources can now be directly configured by the user, by editing 2 simple flat files found in the plugins data directory.
 
@@ -131,7 +131,7 @@ These files are used INSTEAD OF the internal list, so do not delete entries in t
 
 
 
-### The Artist text is very small
+## The Artist text is very small
 
 If you had an older version of the plugin, the font has probably defaulted now that it can be changed separately. Simply open the options and select a new font. The old default was -2px smaller than whatever the Title font is, and "Regular" weight (ie, not bold or italic).
 
@@ -139,7 +139,7 @@ If you had an older version of the plugin, the font has probably defaulted now t
 
 
 
-### I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
+## I am using a 1.X release, and the widget is blank, or its only show the name of the widget and this weird picture of a goat!
 
 If the preview or the live source looks like this:
 
@@ -161,7 +161,7 @@ The other possibility is that you are using an unsupported music source. If this
 
 
 
-### The plugin is not loading at all!
+## The plugin is not loading at all!
 
 The most likely cause is that windows defender has blocked the DLL entirely. Go to your OBS plugins folder (by default, its `C:\Program Files\obs-studio\obs-plugins\64bit`) and look for `obs-spotify-overlay-plugin.dll`. Right click on it, select "Properties", select "Unblock", and then press apply.
 
@@ -171,7 +171,7 @@ If you dont see the DLL there at all, then microsoft defender or some other anti
 
 
 
-### None of this helps me!
+## None of this helps me!
 
 Please create an issue here on github or a post on the OBS forums thread (https://obsproject.com/forum/threads/native-nowplaying-widget-for-obs.196014/) describing the problem with as much detail as possible, I will try to help you.
 
