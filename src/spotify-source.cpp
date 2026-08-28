@@ -79,10 +79,9 @@ constexpr int DEFAULT_VU_RANDOMNESS = 30;
 constexpr int DEFAULT_TITLE_FONT_SIZE = 22;
 constexpr int DEFAULT_ARTIST_FONT_SIZE = 20;
 constexpr int DEFAULT_COLOR_WHITE = 0xFFFFFFFF;
-constexpr int DEFAULT_COLOR_BLACK = 0x00000000;
+constexpr int DEFAULT_COLOR_BLACK = 0xFF000000;
 constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
 constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
-constexpr int DEFAULT_COLOR_OPAQUE_BLACK = 0xFF000000;
 constexpr int DEFAULT_ALBUM_ART_BG_BLUR_PCT = 50;
 
 constexpr int DEFAULT_TEXT_OUTLINE_SIZE_PX = 2;
@@ -597,10 +596,10 @@ struct spotify_source {
 	long long artist_color = DEFAULT_COLOR_WHITE;
 	bool title_outline_enabled = false;
 	int title_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
-	long long title_outline_color = DEFAULT_COLOR_OPAQUE_BLACK;
+	long long title_outline_color = DEFAULT_COLOR_BLACK;
 	bool artist_outline_enabled = false;
 	int artist_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
-	long long artist_outline_color = DEFAULT_COLOR_OPAQUE_BLACK;
+	long long artist_outline_color = DEFAULT_COLOR_BLACK;
 	long long bg_color = 0;
 	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
 	bool use_bg_image = false;
@@ -1947,11 +1946,11 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "title_outline_enabled", false);
 	obs_data_set_default_int(settings, "title_outline_size", DEFAULT_TEXT_OUTLINE_SIZE_PX);
-	obs_data_set_default_int(settings, "title_outline_color", DEFAULT_COLOR_OPAQUE_BLACK);
+	obs_data_set_default_int(settings, "title_outline_color", DEFAULT_COLOR_BLACK);
 
 	obs_data_set_default_bool(settings, "artist_outline_enabled", false);
 	obs_data_set_default_int(settings, "artist_outline_size", DEFAULT_TEXT_OUTLINE_SIZE_PX);
-	obs_data_set_default_int(settings, "artist_outline_color", DEFAULT_COLOR_OPAQUE_BLACK);
+	obs_data_set_default_int(settings, "artist_outline_color", DEFAULT_COLOR_BLACK);
 
 	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
