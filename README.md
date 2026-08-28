@@ -127,17 +127,17 @@ They sources are case insensitive, everything is converted to lowercase before b
 
 Browser sources will ONLY be checked if you have the "Enable browser media sources?" option enabled in the plugin. They are checked after traditional music sources. `308046B0AF4A39CB` in the browser sources is firefox, see [http://bugzilla.mozilla.org/show_bug.cgi?id=2065866](https://bugzilla.mozilla.org/show_bug.cgi?id=2065866)
 
-If you want to add your own source but are having trouble finding a name that machines, you can run this program: https://github.com/lingeriegoat/SpotifyDLLTest while the source is actively playing media, and it will show you the name in the top section, above the track information.
+If you want to add your own source but are having trouble finding a name that matches, you can run this program: https://github.com/lingeriegoat/SpotifyDLLTest while the source is actively playing media, and it will show you the name in the top section, above the track information.
 
 <img width="419" height="284" alt="image" src="https://github.com/user-attachments/assets/bd4852aa-e849-4b95-a6d2-cd1558b1777d" />
 
-The plugin does "fuzzy" matching, so `youtube` is enough here to catch `com.github.th-ch.youtube-music`
+If your program does not appear here, then it does not send data to SMTC and cannot be supported by this plugin. You will need to ask the developer of that program to update it so that it sends its data to SMTC on Windows.
+
+The plugin does "fuzzy" matching, so `youtube` is enough here to catch `com.github.th-ch.youtube-music`, for example.
 
 If you make a mistake, or delete the files, or otherwise make the files inaccessible, the plugin will fall back to the existing internal lists it uses today. You can check the log files for error messages to help troubleshoot any problems you might encounter with this feature.
 
 These files are used INSTEAD OF the internal list, so do not delete entries in the files unless you are absolutely sure you will never want to use that program as a source.
-
-
 
 
 
