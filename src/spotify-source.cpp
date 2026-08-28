@@ -465,7 +465,7 @@ void PaintTextRun(Graphics &g, const std::wstring &text, Font &font, Brush &fill
 	font.GetFamily(&fam);
 
 	GraphicsPath path;
-	path.SetFillMode(FillModeWinding); 
+	path.SetFillMode(FillModeWinding);
 	path.AddString(text.c_str(), -1, &fam, font.GetStyle(), font.GetSize(), layoutRect, &sf);
 
 	Pen outlinePen(outlineColor, outlineWidthPx * 2.0f);
@@ -513,7 +513,13 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 
 	Region savedClip;
 	g.GetClip(&savedClip);
-	g.SetClip(bounds);
+
+
+	float outlinePad = (outlineEnabled && outlineWidthPx > 0.0f) ? outlineWidthPx : 0.0f;
+	RectF clipRect = bounds;
+	clipRect.X -= outlinePad;
+	clipRect.Width += outlinePad * 2.0f;
+	g.SetClip(clipRect);
 
 	RectF r = bounds;
 	r.X -= (REAL)offset;
@@ -955,15 +961,6 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	ctx->last_art_bytes.assign(image_data, image_data + image_len);
 }
 
-// Draws album art as a full-bleed background: uniformly scaled so its width matches
-// the card (preserving aspect ratio), vertically centered with any excess height
-// cropped off top/bottom -- i.e. CSS's "background-size: 100% auto; background-
-// position: center" with overflow hidden. When blurPct > 0, the cropped region is
-// rendered to an offscreen bitmap and blurred in place with GDI+'s Blur effect
-// (GDI+ 1.1, GdiplusEffects.h) before being composited onto the card.
-// `clipPath` should already be the card's rounded-rect region. Only reads from `art`
-// (the same Image already cached for the foreground thumbnail) -- never mutates it,
-// so the separately-drawn foreground album art is unaffected.
 static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPath, int cardW, int cardH, int blurPct, int opacityPercent)
 {
 	if (!art)
@@ -974,8 +971,6 @@ static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPa
 	if (imgW == 0 || imgH == 0 || cardW <= 0 || cardH <= 0)
 		return;
 
-	// Source crop: full width, and whatever vertical slice -- centered -- maps to
-	// the card's height once the image is scaled so its width fills cardW.
 	REAL srcW = (REAL)imgW;
 	REAL srcCropH = (REAL)cardH * (REAL)imgW / (REAL)cardW;
 	if (srcCropH > (REAL)imgH)
@@ -998,9 +993,6 @@ static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPa
 
 	bool blurred = false;
 	if (pct > 0) {
-		// Render the cropped region at full card resolution into an offscreen bitmap,
-		// then blur it in place with GDI+'s Blur effect (GDI+ 1.1, GdiplusEffects.h)
-		// before compositing. This never touches `art` itself.
 		Bitmap cropped(cardW, cardH, PixelFormat32bppARGB);
 		Graphics gc(&cropped);
 		gc.SetInterpolationMode(InterpolationModeHighQualityBicubic);
@@ -1014,8 +1006,6 @@ static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPa
 			g.DrawImage(&cropped, destRect, 0.0f, 0.0f, (REAL)cardW, (REAL)cardH, UnitPixel, &attr);
 			blurred = true;
 		}
-		// else: effect unavailable on this system -- fall through and draw crisp below
-		// rather than showing nothing.
 	}
 
 	if (!blurred)
@@ -2028,8 +2018,7 @@ static void spotify_source_defaults(obs_data_t *settings)
 static bool autohide_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
 	bool enabled = obs_data_get_bool(settings, "autohide_enabled");
-	obs_property_t *after_prop = obs_properties_get(props, "autohide_after_s");
-	obs_property_set_enabled(after_prop, enabled);
+	obs_property_set_enabled(obs_properties_get(props, "autohide_after_s"), enabled);
 	return true;
 }
 
@@ -2053,10 +2042,8 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 {
 	bool useArt = obs_data_get_bool(settings, "use_album_art_as_bg");
 	bool enabled = obs_data_get_bool(settings, "use_bg_image");
-	obs_property_t *path_prop = obs_properties_get(props, "bg_image_path");
-	obs_property_t *bg_color_prop = obs_properties_get(props, "bg_color");
-	obs_property_set_enabled(path_prop, enabled && !useArt);
-	obs_property_set_enabled(bg_color_prop, !enabled && !useArt);
+	obs_property_set_enabled(obs_properties_get(props, "bg_color"), !enabled);
+	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), enabled && !useArt);	
 	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
 	return true;
 }
@@ -2066,11 +2053,8 @@ static bool use_album_art_as_bg_modified(obs_properties_t *props, obs_property_t
 	bool useArt = obs_data_get_bool(settings, "use_album_art_as_bg");
 	bool useImg = obs_data_get_bool(settings, "use_bg_image");
 	obs_property_set_enabled(obs_properties_get(props, "album_art_bg_blur"), useArt);
-	// Album art background takes priority when enabled (see compose_bitmap), so grey
-	// out the other background controls to make that priority visible in the UI.
 	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
 	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), !useArt && useImg);
-	obs_property_set_enabled(obs_properties_get(props, "bg_color"), !useArt && !useImg);
 	return true;
 }
 
@@ -2098,12 +2082,12 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_color_alpha(props, "artist_outline_color", obs_module_text("ArtistOutlineColor"));
 	obs_property_set_modified_callback(artist_outline_enabled_prop, artist_outline_enabled_modified);
 	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
-	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
-	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
-	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
 	obs_property_t *use_album_art_as_bg_prop = obs_properties_add_bool(props, "use_album_art_as_bg", obs_module_text("UseAlbumArtAsBackground"));
 	obs_properties_add_int(props, "album_art_bg_blur", obs_module_text("AlbumArtBackgroundBlur"), 0, 100, 1);
 	obs_property_set_modified_callback(use_album_art_as_bg_prop, use_album_art_as_bg_modified);
+	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
+	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
+	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);	
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
