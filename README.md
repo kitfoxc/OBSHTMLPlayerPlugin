@@ -119,6 +119,8 @@ Once the plugin is installed, the source lists can be found in `<obs root instal
 
 Follow the format of the files and put any new source on its own line. Blank lines will be ignored.
 
+<img width="339" height="291" alt="image" src="https://github.com/user-attachments/assets/eba08204-d1d5-4d71-bb63-2d8d314b7547" />
+
 These source lists work the same way as the internal list did, where it is a ranked choice, top to botton, meaning that if `youtube` appears in the file before `spotify`, `youtube` will have priority when the plugin searches for a source, and if no youtube source is found, it will then check for `spotify`.
 
 They sources are case insensitive, everything is converted to lowercase before being checked.
