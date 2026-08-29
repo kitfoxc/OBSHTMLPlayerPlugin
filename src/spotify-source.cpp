@@ -71,7 +71,6 @@ constexpr int DEFAULT_BACKGROUND_CORNER_RADIUS = 14;
 constexpr int DEFAULT_ALBUM_ART_CORNER_RADIUS = 8;
 constexpr int DEFAULT_BG_OPACITY = 70;
 constexpr int DEFAULT_SCROLL_SPEED_MS = 500;
-constexpr int DEFAULT_VU_UPDATE_MS = 100;
 constexpr int DEFAULT_VU_WIDTH = 37;
 constexpr int DEFAULT_VU_HEIGHT = 43;
 constexpr int DEFAULT_VU_BAR_COUNT = 5;
@@ -85,6 +84,28 @@ constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
 constexpr int DEFAULT_ALBUM_ART_BG_BLUR_PCT = 50;
 
 constexpr int DEFAULT_TEXT_OUTLINE_SIZE_PX = 2;
+
+constexpr int DEFAULT_ANIMATION_UPDATE_MS = 100;
+
+constexpr int DEFAULT_VHS_INTENSITY = 50;
+constexpr int DEFAULT_VHS_CHROMA_ABERRATION = 40;
+
+constexpr int VHS_SCANLINE_SPACING_PX = 3;
+constexpr int VHS_NOISE_TEXTURE_SIZE = 64;
+
+constexpr int VHS_TRACKING_GLITCH_MIN_INTERVAL_MS = 6000; // how often a new tracking-glitch cascade can start
+constexpr int VHS_TRACKING_GLITCH_MAX_INTERVAL_MS = 10000;
+constexpr int VHS_TRACKING_LINE_MIN_COUNT = 2;
+constexpr int VHS_TRACKING_LINE_MAX_COUNT = 3;
+constexpr int VHS_TRACKING_LINE_GAP_PX = 3;           // vertical spacing between lines within a cascading cluster
+constexpr int VHS_TRACKING_LINE_MIN_THICKNESS_PX = 2; // line thickness at 0% intensity
+constexpr int VHS_TRACKING_LINE_MAX_THICKNESS_PX = 4; // line thickness at 100% intensity
+constexpr float VHS_TRACKING_JITTER_MIN_PX = 1.0f;    // sideways jitter range at 0% intensity
+constexpr float VHS_TRACKING_JITTER_MAX_PX = 8.0f;    // sideways jitter range at 100% intensity
+constexpr float VHS_TRACKING_LINE_BRIGHTEN = 0.0f;   // 0..1, added to each color channel of the rolling band
+
+constexpr float VHS_CHROMA_ABERRATION_MAX_OFFSET_PX = 6.0f;     // horizontal (left/right) shift at 100% chroma aberration
+constexpr float VHS_CHROMA_ABERRATION_VERTICAL_FACTOR = 0.015f; // vertical jitter, as a fraction of the horizontal shift
 
 constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
@@ -513,7 +534,6 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	Region savedClip;
 	g.GetClip(&savedClip);
 
-
 	float outlinePad = (outlineEnabled && outlineWidthPx > 0.0f) ? outlineWidthPx : 0.0f;
 	RectF clipRect = bounds;
 	clipRect.X -= outlinePad;
@@ -656,7 +676,7 @@ struct spotify_source {
 	std::string last_song;
 	std::string last_artist;
 	std::unique_ptr<Image> cached_art_image;
-	std::vector<uint8_t> last_art_bytes; // raw bytes of the album art we last cached, for change detection
+	std::vector<uint8_t> last_art_bytes;
 	bool have_track = false;
 
 	bool title_needs_scroll = false;
@@ -680,6 +700,26 @@ struct spotify_source {
 	bool vu_was_playing = false;
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
+
+	bool vhs_effect_enabled = false;
+	int vhs_intensity = DEFAULT_VHS_INTENSITY;
+	int vhs_chroma_aberration = DEFAULT_VHS_CHROMA_ABERRATION;
+	std::chrono::steady_clock::time_point last_vhs_tick{};
+	std::mt19937 vhs_rng{std::random_device{}()};
+	int vhs_scanline_offset = 0;
+	int vhs_noise_offset_x = 0;
+	int vhs_noise_offset_y = 0;
+	bool vhs_glitch_active = false;
+	int vhs_glitch_y = 0;
+	std::unique_ptr<Bitmap> vhs_noise_texture;
+	float vhs_ca_r_dx = 0.0f, vhs_ca_r_dy = 0.0f;
+	float vhs_ca_b_dx = 0.0f, vhs_ca_b_dy = 0.0f;
+	bool vhs_ca_red_active = true;
+	bool vhs_tracking_active = false;
+	int vhs_tracking_line_y = 0;
+	int vhs_tracking_line_count = 3;
+	float vhs_tracking_shift_dir[VHS_TRACKING_LINE_MAX_COUNT] = {0.0f, 0.0f, 0.0f};
+	std::chrono::steady_clock::time_point vhs_tracking_next_start{};
 
 	int64_t song_duration_ticks = 0; // .NET TimeSpan ticks (100ns each)
 	int64_t playback_position_ticks = 0;
@@ -765,6 +805,9 @@ struct AppearanceSettings {
 	bool artist_outline_enabled;
 	int artist_outline_size;
 	long long artist_outline_color;
+	bool vhs_effect_enabled;
+	int vhs_intensity;
+	int vhs_chroma_aberration;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -1013,6 +1056,194 @@ static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPa
 	g.SetClip(&savedClip);
 }
 
+static Bitmap *EnsureVhsNoiseTexture(spotify_source *ctx)
+{
+	if (ctx->vhs_noise_texture)
+		return ctx->vhs_noise_texture.get();
+
+	auto tex = std::make_unique<Bitmap>(VHS_NOISE_TEXTURE_SIZE, VHS_NOISE_TEXTURE_SIZE, PixelFormat32bppARGB);
+	BitmapData bd;
+	Rect full(0, 0, VHS_NOISE_TEXTURE_SIZE, VHS_NOISE_TEXTURE_SIZE);
+	if (tex->LockBits(&full, ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
+		std::mt19937 rng{std::random_device{}()};
+		std::uniform_int_distribution<int> shadeDist(0, 255);
+		std::uniform_int_distribution<int> alphaDist(0, 90); // keep grain subtle even at full intensity
+		for (int y = 0; y < VHS_NOISE_TEXTURE_SIZE; y++) {
+			uint8_t *row = (uint8_t *)bd.Scan0 + (size_t)y * bd.Stride;
+			for (int x = 0; x < VHS_NOISE_TEXTURE_SIZE; x++) {
+				uint8_t shade = (uint8_t)shadeDist(rng);
+				uint8_t a = (uint8_t)alphaDist(rng);
+				// premultiplied BGRA
+				row[x * 4 + 0] = (uint8_t)((shade * a) / 255);
+				row[x * 4 + 1] = (uint8_t)((shade * a) / 255);
+				row[x * 4 + 2] = (uint8_t)((shade * a) / 255);
+				row[x * 4 + 3] = a;
+			}
+		}
+		tex->UnlockBits(&bd);
+	}
+
+	ctx->vhs_noise_texture = std::move(tex);
+	return ctx->vhs_noise_texture.get();
+}
+
+static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, GraphicsPath &clipPath, int cardW, int cardH, int intensity, int chromaAberration)
+{
+	REAL t = std::clamp(intensity, 0, 100) / 100.0f;
+	if (t <= 0.0f)
+		return;
+
+	Gdiplus::HueSaturationLightness hsl;
+	Gdiplus::HueSaturationLightnessParams hslParams = {0, (INT)(-45.0f * t), 0};
+	if (hsl.SetParameters(&hslParams) == Ok)
+		card.ApplyEffect(&hsl, nullptr);
+
+	Gdiplus::BrightnessContrast bc;
+	Gdiplus::BrightnessContrastParams bcParams = {(INT)(-8.0f * t), (INT)(25.0f * t)};
+	if (bc.SetParameters(&bcParams) == Ok)
+		card.ApplyEffect(&bc, nullptr);
+
+	Region savedClip;
+	g.GetClip(&savedClip);
+	g.SetClip(&clipPath);
+
+	REAL ca = std::clamp(chromaAberration, 0, 100) / 100.0f;
+	if (ca > 0.0f && cardW > 0 && cardH > 0) {
+		BitmapData bd;
+		Rect full(0, 0, cardW, cardH);
+		if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
+			std::vector<uint8_t> src((size_t)cardW * cardH * 4);
+			const uint8_t *srcRow = (const uint8_t *)bd.Scan0;
+			for (int y = 0; y < cardH; y++)
+				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
+			card.UnlockBits(&bd);
+
+			REAL maxOffsetPx = VHS_CHROMA_ABERRATION_MAX_OFFSET_PX * ca;
+			int rdx = 0, rdy = 0, bdx = 0, bdy = 0;
+			if (ctx->vhs_ca_red_active) {
+				rdx = (int)std::lround(ctx->vhs_ca_r_dx * maxOffsetPx);
+				rdy = (int)std::lround(ctx->vhs_ca_r_dy * maxOffsetPx * VHS_CHROMA_ABERRATION_VERTICAL_FACTOR);
+			} else {
+				bdx = (int)std::lround(ctx->vhs_ca_b_dx * maxOffsetPx);
+				bdy = (int)std::lround(ctx->vhs_ca_b_dy * maxOffsetPx * VHS_CHROMA_ABERRATION_VERTICAL_FACTOR);
+			}
+
+			auto sampleChannel = [&](int x, int y, int channel) -> uint8_t {
+				x = std::clamp(x, 0, cardW - 1);
+				y = std::clamp(y, 0, cardH - 1);
+				return src[((size_t)y * cardW + (size_t)x) * 4 + (size_t)channel];
+			};
+
+			if (card.LockBits(&full, ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
+				uint8_t *dstBase = (uint8_t *)bd.Scan0;
+				for (int y = 0; y < cardH; y++) {
+					uint8_t *row = dstBase + (size_t)y * bd.Stride;
+					for (int x = 0; x < cardW; x++) {
+						size_t origIdx = ((size_t)y * cardW + (size_t)x) * 4;
+						uint8_t *px = row + (size_t)x * 4;
+						px[0] = sampleChannel(x + bdx, y + bdy, 0);
+						px[1] = src[origIdx + 1];
+						px[2] = sampleChannel(x + rdx, y + rdy, 2);
+						px[3] = src[origIdx + 3];
+					}
+				}
+				card.UnlockBits(&bd);
+			}
+		}
+	}
+
+	if (ctx->vhs_tracking_active && cardH > 4) {
+		std::unique_ptr<Bitmap> trackSnap(card.Clone(0, 0, cardW, cardH, PixelFormat32bppARGB));
+		if (trackSnap) {
+			Gdiplus::ColorMatrix brightenMatrix = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, VHS_TRACKING_LINE_BRIGHTEN, VHS_TRACKING_LINE_BRIGHTEN, VHS_TRACKING_LINE_BRIGHTEN, 0, 1};
+			ImageAttributes brightenAttr;
+			brightenAttr.SetColorMatrix(&brightenMatrix, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+
+			int bandH = VHS_TRACKING_LINE_MIN_THICKNESS_PX + (int)((VHS_TRACKING_LINE_MAX_THICKNESS_PX - VHS_TRACKING_LINE_MIN_THICKNESS_PX) * t);
+			int lineCount = std::clamp(ctx->vhs_tracking_line_count, 1, VHS_TRACKING_LINE_MAX_COUNT);
+			for (int i = 0; i < lineCount; i++) {
+				int bandY = ctx->vhs_tracking_line_y - i * VHS_TRACKING_LINE_GAP_PX;
+				if (bandY < 0 || bandY > cardH - bandH)
+					continue;
+				REAL shiftPx = ctx->vhs_tracking_shift_dir[i] * (VHS_TRACKING_JITTER_MIN_PX + (VHS_TRACKING_JITTER_MAX_PX - VHS_TRACKING_JITTER_MIN_PX) * t);
+				RectF destBand(shiftPx, (REAL)bandY, (REAL)cardW, (REAL)bandH);
+				g.DrawImage(trackSnap.get(), destBand, 0.0f, (REAL)bandY, (REAL)cardW, (REAL)bandH, UnitPixel, &brightenAttr);
+			}
+		}
+	}
+
+	Color scanColor(std::clamp((int)(70.0f * t), 0, 255), 0, 0, 0);
+	SolidBrush scanBrush(scanColor);
+	for (int y = -VHS_SCANLINE_SPACING_PX + ctx->vhs_scanline_offset; y < cardH; y += VHS_SCANLINE_SPACING_PX)
+		g.FillRectangle(&scanBrush, Rect(0, y, cardW, 1));
+
+	Bitmap *noiseTex = EnsureVhsNoiseTexture(ctx);
+	if (noiseTex) {
+		ImageAttributes noiseAttr;
+		Gdiplus::ColorMatrix cm = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, t, 0, 0, 0, 0, 0, 1};
+		noiseAttr.SetColorMatrix(&cm, ColorMatrixFlagsDefault, ColorAdjustTypeBitmap);
+
+		RectF texRect(0.0f, 0.0f, (REAL)VHS_NOISE_TEXTURE_SIZE, (REAL)VHS_NOISE_TEXTURE_SIZE);
+		TextureBrush noiseBrush(noiseTex, texRect, &noiseAttr);
+		noiseBrush.SetWrapMode(WrapModeTile);
+		Matrix m;
+		m.Translate((REAL)-ctx->vhs_noise_offset_x, (REAL)-ctx->vhs_noise_offset_y);
+		noiseBrush.SetTransform(&m);
+		g.FillRectangle(&noiseBrush, Rect(0, 0, cardW, cardH));
+	}
+
+	if (ctx->vhs_glitch_active) {
+		std::unique_ptr<Bitmap> glitchSnap;
+		if (cardH > 4)
+			glitchSnap.reset(card.Clone(0, 0, cardW, cardH, PixelFormat32bppARGB));
+
+		std::uniform_int_distribution<int> bandCountDist(1, 4);
+		int bandCount = bandCountDist(ctx->vhs_rng);
+		for (int b = 0; b < bandCount; b++) {
+			std::uniform_int_distribution<int> yJitterDist(-5, 5);
+			int baseBandY = std::clamp(ctx->vhs_glitch_y + yJitterDist(ctx->vhs_rng), 0, std::max(0, cardH - 1));
+
+			if (glitchSnap) {
+				std::uniform_int_distribution<int> shiftBandHDist(2, 6);
+				int shiftBandH = std::min(shiftBandHDist(ctx->vhs_rng), cardH - baseBandY);
+				if (shiftBandH > 0) {
+					std::uniform_real_distribution<double> dirDist(-1.0, 1.0);
+					REAL shiftPx = (REAL)dirDist(ctx->vhs_rng) * (VHS_TRACKING_JITTER_MIN_PX + (VHS_TRACKING_JITTER_MAX_PX - VHS_TRACKING_JITTER_MIN_PX) * t);
+					RectF destBand(shiftPx, (REAL)baseBandY, (REAL)cardW, (REAL)shiftBandH);
+					g.DrawImage(glitchSnap.get(), destBand, 0.0f, (REAL)baseBandY, (REAL)cardW, (REAL)shiftBandH, UnitPixel, nullptr);
+				}
+			}
+
+			std::uniform_int_distribution<int> segWDist(2, std::max(6, cardW / 8));
+			std::uniform_int_distribution<int> gapWDist(0, std::max(4, cardW / 10));
+			std::uniform_int_distribution<int> segHDist(1, 3);
+			std::uniform_int_distribution<int> rowJitterDist(-1, 1);
+			std::uniform_int_distribution<int> alphaDist(40, 255);
+			std::uniform_int_distribution<int> tintDist(215, 255);
+			std::uniform_int_distribution<int> startXDist(-cardW / 10, 0);
+
+			int x = startXDist(ctx->vhs_rng);
+			while (x < cardW) {
+				int segW = segWDist(ctx->vhs_rng);
+				int segH = segHDist(ctx->vhs_rng);
+				int segY = std::clamp(baseBandY + rowJitterDist(ctx->vhs_rng), 0, std::max(0, cardH - segH));
+				int alpha = std::clamp((int)(alphaDist(ctx->vhs_rng) * t), 0, 255);
+				Color segColor(alpha, tintDist(ctx->vhs_rng), tintDist(ctx->vhs_rng), tintDist(ctx->vhs_rng));
+				SolidBrush segBrush(segColor);
+
+				int drawX = std::max(0, x);
+				int drawW = std::min(segW - (drawX - x), cardW - drawX);
+				if (drawW > 0)
+					g.FillRectangle(&segBrush, Rect(drawX, segY, drawW, segH));
+
+				x += segW + gapWDist(ctx->vhs_rng);
+			}
+		}
+	}
+
+	g.SetClip(&savedClip);
+}
+
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
 {
 	const int cardW = std::max(s.card_w, 50);
@@ -1241,11 +1472,12 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	ctx->title_scroll_max_px = titleMaxOffset;
 	ctx->artist_scroll_max_px = artistMaxOffset;
 
-	// VU meter (shared drawing code)
 	DrawVuMeter(g, ctx, s, vuBlockRect);
 
-	// Progress bar
 	DrawProgressBar(g, ctx, s, progressBarRect);
+
+	if (s.vhs_effect_enabled)
+		DrawVhsOverlay(g, card, ctx, bgPath, cardW, cardH, s.vhs_intensity, s.vhs_chroma_aberration);
 
 	BitmapData bd;
 	Rect full(0, 0, cardW, cardH);
@@ -1272,7 +1504,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->use_album_art_as_bg, ctx->album_art_bg_blur_pct, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color};
+	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->use_album_art_as_bg, ctx->album_art_bg_blur_pct, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color, ctx->vhs_effect_enabled, ctx->vhs_intensity, ctx->vhs_chroma_aberration};
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
@@ -1606,6 +1838,56 @@ static void poll_loop(spotify_source *ctx)
 						needCompose = true;
 					}
 
+					if (s.vhs_effect_enabled && now - ctx->last_vhs_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
+						ctx->last_vhs_tick = now;
+
+						std::uniform_int_distribution<int> noiseOffDist(0, VHS_NOISE_TEXTURE_SIZE - 1);
+						ctx->vhs_noise_offset_x = noiseOffDist(ctx->vhs_rng);
+						ctx->vhs_noise_offset_y = noiseOffDist(ctx->vhs_rng);
+
+						ctx->vhs_scanline_offset = (ctx->vhs_scanline_offset + 1) % VHS_SCANLINE_SPACING_PX;
+
+						std::uniform_real_distribution<double> glitchChance(0.0, 1.0);
+						ctx->vhs_glitch_active = glitchChance(ctx->vhs_rng) < 0.08;
+						if (ctx->vhs_glitch_active) {
+							std::uniform_int_distribution<int> yDist(0, std::max(1, s.card_h - 1));
+							ctx->vhs_glitch_y = yDist(ctx->vhs_rng);
+						}
+
+						std::uniform_real_distribution<double> jitterDist(-1.0, 1.0);
+						ctx->vhs_ca_r_dx = (float)jitterDist(ctx->vhs_rng);
+						ctx->vhs_ca_r_dy = (float)jitterDist(ctx->vhs_rng);
+						ctx->vhs_ca_b_dx = (float)jitterDist(ctx->vhs_rng);
+						ctx->vhs_ca_b_dy = (float)jitterDist(ctx->vhs_rng);
+						std::uniform_int_distribution<int> coinFlip(0, 1);
+						ctx->vhs_ca_red_active = coinFlip(ctx->vhs_rng) == 0;
+
+						std::uniform_int_distribution<int> intervalDist(VHS_TRACKING_GLITCH_MIN_INTERVAL_MS, VHS_TRACKING_GLITCH_MAX_INTERVAL_MS);
+						if (!ctx->vhs_tracking_active) {
+							if (ctx->vhs_tracking_next_start == std::chrono::steady_clock::time_point{}) {
+								ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
+							} else if (now >= ctx->vhs_tracking_next_start) {
+								ctx->vhs_tracking_active = true;
+								ctx->vhs_tracking_line_y = 0;
+								std::uniform_int_distribution<int> countDist(VHS_TRACKING_LINE_MIN_COUNT, VHS_TRACKING_LINE_MAX_COUNT);
+								ctx->vhs_tracking_line_count = countDist(ctx->vhs_rng);
+								for (int i = 0; i < VHS_TRACKING_LINE_MAX_COUNT; i++)
+									ctx->vhs_tracking_shift_dir[i] = (float)jitterDist(ctx->vhs_rng);
+							}
+						} else {
+							for (int i = 0; i < VHS_TRACKING_LINE_MAX_COUNT; i++)
+								ctx->vhs_tracking_shift_dir[i] = (float)jitterDist(ctx->vhs_rng);
+
+							ctx->vhs_tracking_line_y += std::max(1, s.card_h / 24);
+							if (ctx->vhs_tracking_line_y >= s.card_h + ctx->vhs_tracking_line_count * VHS_TRACKING_LINE_GAP_PX) {
+								ctx->vhs_tracking_active = false;
+								ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
+							}
+						}
+
+						needCompose = true;
+					}
+
 					if (needCompose) {
 						compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
 					}
@@ -1708,11 +1990,11 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur", "vhs_intensity", "vhs_chroma_aberration",
 };
 
 static const char *const kSettingsBoolKeys[] = {
-	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing", "title_outline_enabled", "artist_outline_enabled", "use_album_art_as_bg",
+	"use_bg_image", "vu_meter_enabled", "vu_horizontal", "vertical_layout", "show_album_name", "show_goat_placeholder", "show_plugin_attribution", "hide_album_art", "show_progress_bar", "track_change_animation_enabled", "autohide_enabled", "autohide_when_not_playing", "title_outline_enabled", "artist_outline_enabled", "use_album_art_as_bg", "vhs_effect_enabled",
 };
 
 static const char *const kSettingsStringKeys[] = {
@@ -1824,6 +2106,13 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->artist_outline_size = (int)obs_data_get_int(settings, "artist_outline_size");
 	ctx->artist_outline_size = std::clamp(ctx->artist_outline_size, 1, 50);
 	ctx->artist_outline_color = obs_data_get_int(settings, "artist_outline_color");
+
+	ctx->vhs_effect_enabled = obs_data_get_bool(settings, "vhs_effect_enabled");
+	ctx->vhs_intensity = (int)obs_data_get_int(settings, "vhs_intensity");
+	ctx->vhs_intensity = std::clamp(ctx->vhs_intensity, 0, 100);
+
+	ctx->vhs_chroma_aberration = (int)obs_data_get_int(settings, "vhs_chroma_aberration");
+	ctx->vhs_chroma_aberration = std::clamp(ctx->vhs_chroma_aberration, 0, 100);
 
 	ctx->bg_color = obs_data_get_int(settings, "bg_color");
 
@@ -1952,6 +2241,10 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "artist_outline_size", DEFAULT_TEXT_OUTLINE_SIZE_PX);
 	obs_data_set_default_int(settings, "artist_outline_color", DEFAULT_COLOR_BLACK);
 
+	obs_data_set_default_bool(settings, "vhs_effect_enabled", false);
+	obs_data_set_default_int(settings, "vhs_intensity", DEFAULT_VHS_INTENSITY);
+	obs_data_set_default_int(settings, "vhs_chroma_aberration", DEFAULT_VHS_CHROMA_ABERRATION);
+
 	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
 	obs_data_set_default_string(settings, "export_settings_path", "");
@@ -1974,7 +2267,7 @@ static void spotify_source_defaults(obs_data_t *settings)
 
 	obs_data_set_default_bool(settings, "vu_meter_enabled", true);
 	obs_data_set_default_int(settings, "vu_color", DEFAULT_COLOR_GREEN);
-	obs_data_set_default_int(settings, "vu_update_ms", DEFAULT_VU_UPDATE_MS);
+	obs_data_set_default_int(settings, "vu_update_ms", DEFAULT_ANIMATION_UPDATE_MS);
 	obs_data_set_default_int(settings, "vu_randomness", DEFAULT_VU_RANDOMNESS);
 
 	obs_data_set_default_int(settings, "vu_width", DEFAULT_VU_WIDTH);
@@ -2042,7 +2335,7 @@ static bool use_bg_image_modified(obs_properties_t *props, obs_property_t *, obs
 	bool useArt = obs_data_get_bool(settings, "use_album_art_as_bg");
 	bool enabled = obs_data_get_bool(settings, "use_bg_image");
 	obs_property_set_enabled(obs_properties_get(props, "bg_color"), !enabled);
-	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), enabled && !useArt);	
+	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), enabled && !useArt);
 	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
 	return true;
 }
@@ -2054,6 +2347,14 @@ static bool use_album_art_as_bg_modified(obs_properties_t *props, obs_property_t
 	obs_property_set_enabled(obs_properties_get(props, "album_art_bg_blur"), useArt);
 	obs_property_set_enabled(obs_properties_get(props, "use_bg_image"), !useArt);
 	obs_property_set_enabled(obs_properties_get(props, "bg_image_path"), !useArt && useImg);
+	return true;
+}
+
+static bool vhs_effect_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "vhs_effect_enabled");
+	obs_property_set_enabled(obs_properties_get(props, "vhs_intensity"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vhs_chroma_aberration"), enabled);
 	return true;
 }
 
@@ -2086,7 +2387,7 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_property_set_modified_callback(use_album_art_as_bg_prop, use_album_art_as_bg_modified);
 	obs_property_t *use_bg_image_prop = obs_properties_add_bool(props, "use_bg_image", obs_module_text("UseImageAsBackground"));
 	obs_properties_add_path(props, "bg_image_path", obs_module_text("BackgroundImagePath"), OBS_PATH_FILE, "Image Files (*.jpg *.jpeg *.png);;All Files (*.*)", nullptr);
-	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);	
+	obs_property_set_modified_callback(use_bg_image_prop, use_bg_image_modified);
 	obs_properties_add_color(props, "bg_color", obs_module_text("BackgroundColor"));
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
@@ -2112,6 +2413,11 @@ static obs_properties_t *spotify_source_properties(void *)
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
 	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
+
+	obs_property_t *vhs_effect_enabled_prop = obs_properties_add_bool(props, "vhs_effect_enabled", obs_module_text("VhsEffectEnabled"));
+	obs_properties_add_int(props, "vhs_intensity", obs_module_text("VhsEffectIntensity"), 0, 100, 1);
+	obs_properties_add_int(props, "vhs_chroma_aberration", obs_module_text("VhsChromaticAberration"), 0, 100, 1);
+	obs_property_set_modified_callback(vhs_effect_enabled_prop, vhs_effect_enabled_modified);
 
 	obs_property_t *export_settings_prop = obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
 	obs_property_set_modified_callback(export_settings_prop, export_settings_modified);
