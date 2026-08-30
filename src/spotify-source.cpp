@@ -72,12 +72,14 @@ constexpr int DEFAULT_BACKGROUND_CORNER_RADIUS = 14;
 constexpr int DEFAULT_ALBUM_ART_CORNER_RADIUS = 8;
 constexpr int DEFAULT_BG_OPACITY = 70;
 constexpr int DEFAULT_SCROLL_SPEED_MS = 500;
-constexpr int DEFAULT_VU_WIDTH = 37;
-constexpr int DEFAULT_VU_HEIGHT = 43;
-constexpr int DEFAULT_VU_BAR_COUNT = 5;
-constexpr int DEFAULT_VU_RANDOMNESS = 30;
 constexpr int DEFAULT_TITLE_FONT_SIZE = 22;
+constexpr int DEFAULT_TITLE_FONT_FLAGS = 0;
+constexpr const char *DEFAULT_TITLE_FONT_FACE = "Segoe UI";
+constexpr const char *DEFAULT_TITLE_FONT_STYLE = "Regular";
 constexpr int DEFAULT_ARTIST_FONT_SIZE = 20;
+constexpr int DEFAULT_ARTIST_FONT_FLAGS = 0;
+constexpr const char *DEFAULT_ARTIST_FONT_FACE = "Segoe UI";
+constexpr const char *DEFAULT_ARTIST_FONT_STYLE = "Regular";
 constexpr int DEFAULT_COLOR_WHITE = 0xFFFFFFFF;
 constexpr int DEFAULT_COLOR_BLACK = 0xFF000000;
 constexpr int DEFAULT_COLOR_DARK_GREY = 0xFF5A5A5A;
@@ -85,6 +87,13 @@ constexpr int DEFAULT_COLOR_GREEN = 0xFF60D71E;
 constexpr int DEFAULT_ALBUM_ART_BG_BLUR_PCT = 50;
 constexpr int DEFAULT_TEXT_OUTLINE_SIZE_PX = 2;
 constexpr int DEFAULT_ANIMATION_UPDATE_MS = 100;
+
+constexpr int DEFAULT_VU_COLOR = 0xFFFFFFFF;
+constexpr int DEFAULT_VU_UPDATE_SPEED_MS = 250;
+constexpr int DEFAULT_VU_RANDOMNESS = 50;
+constexpr int DEFAULT_VU_WIDTH = 37;
+constexpr int DEFAULT_VU_HEIGHT = 43;
+constexpr int DEFAULT_VU_BAR_COUNT = 5;
 
 constexpr int DEFAULT_VHS_INTENSITY = 50;
 constexpr int DEFAULT_VHS_CHROMA_ABERRATION = 40;
@@ -130,7 +139,7 @@ constexpr int DEFAULT_BW_CONTRAST = 20;
 constexpr double DEFAULT_BW_VIGNETTE_STRENGTH = 0.0;
 
 constexpr int DEFAULT_GLITCH_INTENSITY = 50;
-constexpr int DEFAULT_GLITCH_PIXEL_SORT_CHANCE = 15;    // 0..100
+constexpr int DEFAULT_GLITCH_PIXEL_SORT_CHANCE = 15; // 0..100
 constexpr int DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS = 6;
 constexpr int DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD = 35; // 0..100
 constexpr int DEFAULT_GLITCH_TEAR_CHANCE = 20;          // 0..100
@@ -653,6 +662,113 @@ struct GlitchChannelBlock {
 
 } // namespace
 
+// ---------------------------------------------------------------------
+// AppearanceSettings macro
+// ---------------------------------------------------------------------
+#define APPEARANCE_SETTINGS_FIELDS(X) \
+	X(long long, title_color, DEFAULT_COLOR_WHITE) \
+	X(long long, artist_color, DEFAULT_COLOR_WHITE) \
+	X(long long, bg_color, 0) \
+	X(int, bg_opacity, DEFAULT_BG_OPACITY) \
+	X(bool, use_bg_image, false) \
+	X(std::string, bg_image_path, "") \
+	X(bool, use_album_art_as_bg, false) \
+	X(int, album_art_bg_blur_pct, DEFAULT_ALBUM_ART_BG_BLUR_PCT) \
+	X(int, background_corner_radius, DEFAULT_BACKGROUND_CORNER_RADIUS) \
+	X(int, album_art_corner_radius, DEFAULT_ALBUM_ART_CORNER_RADIUS) \
+	X(std::string, title_font_face, DEFAULT_TITLE_FONT_FACE) \
+	X(std::string, title_font_style, DEFAULT_TITLE_FONT_STYLE) \
+	X(int, title_font_size, DEFAULT_TITLE_FONT_SIZE) \
+	X(int, title_font_flags, DEFAULT_TITLE_FONT_FLAGS) \
+	X(std::string, artist_font_face, DEFAULT_ARTIST_FONT_FACE) \
+	X(std::string, artist_font_style, DEFAULT_ARTIST_FONT_STYLE) \
+	X(int, artist_font_size, DEFAULT_ARTIST_FONT_SIZE) \
+	X(int, artist_font_flags, DEFAULT_ARTIST_FONT_FLAGS) \
+	X(int, card_w, DEFAULT_CARD_W) \
+	X(int, card_h, DEFAULT_CARD_H) \
+	X(int, text_offset_y, 0) \
+	X(int, progress_bar_gap, DEFAULT_PROGRESS_BAR_GAP) \
+	X(int, progress_bar_height, DEFAULT_PROGRESS_BAR_HEIGHT) \
+	X(int, scroll_speed_ms, DEFAULT_SCROLL_SPEED_MS) \
+	X(bool, browser_media_source_enabled, DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES) \
+	X(bool, vu_meter_enabled, true) \
+	X(long long, vu_color, DEFAULT_VU_COLOR) \
+	X(int, vu_update_ms, DEFAULT_VU_UPDATE_SPEED_MS) \
+	X(int, vu_randomness, DEFAULT_VU_RANDOMNESS) \
+	X(int, vu_width, DEFAULT_VU_WIDTH) \
+	X(int, vu_height, DEFAULT_VU_HEIGHT) \
+	X(int, vu_bar_count, DEFAULT_VU_BAR_COUNT) \
+	X(bool, vu_horizontal, false) \
+	X(bool, vertical_layout, false) \
+	X(bool, show_album_name, false) \
+	X(bool, show_goat_placeholder, true) \
+	X(bool, show_plugin_attribution, true) \
+	X(bool, hide_album_art, false) \
+	X(bool, show_progress_bar, true) \
+	X(long long, progress_fill_color, DEFAULT_COLOR_WHITE) \
+	X(long long, progress_bg_color, DEFAULT_COLOR_DARK_GREY) \
+	X(bool, track_change_animation_enabled, true) \
+	X(bool, autohide_enabled, false) \
+	X(int, autohide_after_s, DEFAULT_AUTOHIDE_AFTER_S) \
+	X(bool, autohide_when_not_playing, false) \
+	X(bool, title_outline_enabled, false) \
+	X(int, title_outline_size, DEFAULT_TEXT_OUTLINE_SIZE_PX) \
+	X(long long, title_outline_color, DEFAULT_COLOR_BLACK) \
+	X(bool, artist_outline_enabled, false) \
+	X(int, artist_outline_size, DEFAULT_TEXT_OUTLINE_SIZE_PX) \
+	X(long long, artist_outline_color, DEFAULT_COLOR_BLACK) \
+	X(std::string, card_style, "none") \
+	X(int, vhs_intensity, DEFAULT_VHS_INTENSITY) \
+	X(int, vhs_chroma_aberration, DEFAULT_VHS_CHROMA_ABERRATION) \
+	X(int, vhs_scanline_spacing, DEFAULT_VHS_SCANLINE_SPACING_PX) \
+	X(int, vhs_scanline_intensity, DEFAULT_VHS_SCANLINE_INTENSITY) \
+	X(int, vhs_tracking_min_interval_s, DEFAULT_VHS_TRACKING_MIN_INTERVAL_S) \
+	X(int, vhs_tracking_max_interval_s, DEFAULT_VHS_TRACKING_MAX_INTERVAL_S) \
+	X(int, vhs_tracking_line_min_count, DEFAULT_VHS_TRACKING_LINE_MIN_COUNT) \
+	X(int, vhs_tracking_line_max_count, DEFAULT_VHS_TRACKING_LINE_MAX_COUNT) \
+	X(int, vhs_tracking_line_gap, DEFAULT_VHS_TRACKING_LINE_GAP_PX) \
+	X(int, vhs_tracking_min_thickness, DEFAULT_VHS_TRACKING_MIN_THICKNESS_PX) \
+	X(int, vhs_tracking_max_thickness, DEFAULT_VHS_TRACKING_MAX_THICKNESS_PX) \
+	X(double, vhs_tracking_jitter_min, DEFAULT_VHS_TRACKING_JITTER_MIN_PX) \
+	X(double, vhs_tracking_jitter_max, DEFAULT_VHS_TRACKING_JITTER_MAX_PX) \
+	X(double, vhs_tracking_brighten, DEFAULT_VHS_TRACKING_BRIGHTEN) \
+	X(double, vhs_chroma_max_offset, DEFAULT_VHS_CHROMA_MAX_OFFSET_PX) \
+	X(double, vhs_chroma_vertical_jitter, DEFAULT_VHS_CHROMA_VERTICAL_JITTER) \
+	X(int, vhs_glitch_chance_pct, DEFAULT_VHS_GLITCH_CHANCE_PCT) \
+	X(int, vhs_glitch_max_bands, DEFAULT_VHS_GLITCH_MAX_BANDS) \
+	X(int, vhs_grain_amount, DEFAULT_VHS_GRAIN_AMOUNT) \
+	X(int, eightmm_intensity, DEFAULT_EIGHTMM_INTENSITY) \
+	X(double, eightmm_vignette_strength, DEFAULT_EIGHTMM_VIGNETTE_STRENGTH) \
+	X(double, eightmm_warmth, DEFAULT_EIGHTMM_WARMTH) \
+	X(double, eightmm_light_leak_alpha, DEFAULT_EIGHTMM_LIGHT_LEAK_ALPHA) \
+	X(std::string, eightmm_light_leak_position, DEFAULT_EIGHTMM_LIGHT_LEAK_POSITION) \
+	X(int, eightmm_light_leak_intensity, DEFAULT_EIGHTMM_LIGHT_LEAK_INTENSITY) \
+	X(double, eightmm_weave_px, DEFAULT_EIGHTMM_WEAVE_PX) \
+	X(double, eightmm_flicker, DEFAULT_EIGHTMM_FLICKER) \
+	X(int, eightmm_scratch_intensity, DEFAULT_EIGHTMM_SCRATCH_INTENSITY) \
+	X(int, eightmm_dust_intensity, DEFAULT_EIGHTMM_DUST_INTENSITY) \
+	X(int, eightmm_scratch_max_count, DEFAULT_EIGHTMM_SCRATCH_MAX_COUNT) \
+	X(int, eightmm_dust_max_count, DEFAULT_EIGHTMM_DUST_MAX_COUNT) \
+	X(long long, duotone_shadow_color, DEFAULT_DUOTONE_SHADOW_COLOR) \
+	X(long long, duotone_highlight_color, DEFAULT_DUOTONE_HIGHLIGHT_COLOR) \
+	X(int, duotone_intensity, DEFAULT_DUOTONE_INTENSITY) \
+	X(int, bw_desaturation, DEFAULT_BW_DESATURATION) \
+	X(int, bw_contrast, DEFAULT_BW_CONTRAST) \
+	X(double, bw_vignette_strength, DEFAULT_BW_VIGNETTE_STRENGTH) \
+	X(int, glitch_intensity, DEFAULT_GLITCH_INTENSITY) \
+	X(int, glitch_pixel_sort_chance, DEFAULT_GLITCH_PIXEL_SORT_CHANCE) \
+	X(int, glitch_pixel_sort_max_rows, DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS) \
+	X(int, glitch_pixel_sort_threshold, DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD) \
+	X(int, glitch_tear_chance, DEFAULT_GLITCH_TEAR_CHANCE) \
+	X(int, glitch_tear_max_count, DEFAULT_GLITCH_TEAR_MAX_COUNT) \
+	X(int, glitch_tear_max_height, DEFAULT_GLITCH_TEAR_MAX_HEIGHT) \
+	X(int, glitch_tear_max_offset, DEFAULT_GLITCH_TEAR_MAX_OFFSET) \
+	X(int, glitch_tear_duplicate_chance, DEFAULT_GLITCH_TEAR_DUPLICATE_CHANCE) \
+	X(int, glitch_channel_block_chance, DEFAULT_GLITCH_CHANNEL_BLOCK_CHANCE) \
+	X(int, glitch_channel_block_max_count, DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_COUNT) \
+	X(int, glitch_channel_block_max_size, DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_SIZE) \
+	X(int, glitch_channel_block_max_offset, DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_OFFSET)
+
 struct spotify_source {
 	obs_source_t *source = nullptr;
 
@@ -666,57 +782,9 @@ struct spotify_source {
 	std::vector<const char *> kPossibleBrowserMediaSources;
 
 	std::mutex settings_mutex;
-	long long title_color = DEFAULT_COLOR_WHITE;
-	long long artist_color = DEFAULT_COLOR_WHITE;
-	bool title_outline_enabled = false;
-	int title_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
-	long long title_outline_color = DEFAULT_COLOR_BLACK;
-	bool artist_outline_enabled = false;
-	int artist_outline_size = DEFAULT_TEXT_OUTLINE_SIZE_PX;
-	long long artist_outline_color = DEFAULT_COLOR_BLACK;
-	long long bg_color = 0;
-	int bg_opacity = DEFAULT_BG_OPACITY; // percent, 0-100
-	bool use_bg_image = false;
-	std::string bg_image_path;
-	bool use_album_art_as_bg = false;
-	int album_art_bg_blur_pct = DEFAULT_ALBUM_ART_BG_BLUR_PCT;
-	int background_corner_radius = DEFAULT_BACKGROUND_CORNER_RADIUS;
-	int album_art_corner_radius = DEFAULT_ALBUM_ART_CORNER_RADIUS;
-	std::string title_font_face = "Segoe UI";
-	std::string title_font_style = "Regular";
-	int title_font_size = 16;
-	int title_font_flags = 0;
-	std::string artist_font_face = "Segoe UI";
-	std::string artist_font_style = "Regular";
-	int artist_font_size = 14;
-	int artist_font_flags = 0;
-	int card_w = DEFAULT_CARD_W;
-	int card_h = DEFAULT_CARD_H;
-	int text_offset_y = 0;
-	int progress_bar_gap = DEFAULT_PROGRESS_BAR_GAP;
-	int progress_bar_height = DEFAULT_PROGRESS_BAR_HEIGHT;
-	int scroll_speed_ms = DEFAULT_SCROLL_SPEED_MS; // for the marquee scroll
-	bool browser_media_source_enabled = DEFAULT_ENABLE_BROWSER_MEDIA_SOURCES;
-	bool vu_meter_enabled = true;
-	long long vu_color = 0xFFFFFFFF;
-	int vu_update_ms = 250;
-	int vu_randomness = 50;
-	int vu_width = 37;
-	int vu_height = 43;
-	int vu_bar_count = 5;
-	bool vu_horizontal = false;
-	bool vertical_layout = false;
-	bool show_album_name = false;
-	bool show_goat_placeholder = true;
-	bool show_plugin_attribution = true;
-	bool hide_album_art = false;
-	bool show_progress_bar = true;
-	long long progress_fill_color = DEFAULT_COLOR_WHITE;
-	long long progress_bg_color = DEFAULT_COLOR_DARK_GREY;
-	bool track_change_animation_enabled = true;
-	bool autohide_enabled = false;
-	int autohide_after_s = DEFAULT_AUTOHIDE_AFTER_S;
-	bool autohide_when_not_playing = false;
+#define X(type, name, def) type name = def;
+	APPEARANCE_SETTINGS_FIELDS(X)
+#undef X
 	std::atomic<bool> settings_dirty{true};
 
 	std::mutex bitmap_mutex;
@@ -755,27 +823,6 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
 
-	std::string card_style = "none"; // "none", "vhs", "8mm", "duotone", "bw", "glitch"
-
-	int vhs_intensity = DEFAULT_VHS_INTENSITY;
-	int vhs_chroma_aberration = DEFAULT_VHS_CHROMA_ABERRATION;
-	int vhs_scanline_spacing = DEFAULT_VHS_SCANLINE_SPACING_PX;
-	int vhs_scanline_intensity = DEFAULT_VHS_SCANLINE_INTENSITY;
-	int vhs_tracking_min_interval_s = DEFAULT_VHS_TRACKING_MIN_INTERVAL_S;
-	int vhs_tracking_max_interval_s = DEFAULT_VHS_TRACKING_MAX_INTERVAL_S;
-	int vhs_tracking_line_min_count = DEFAULT_VHS_TRACKING_LINE_MIN_COUNT;
-	int vhs_tracking_line_max_count = DEFAULT_VHS_TRACKING_LINE_MAX_COUNT;
-	int vhs_tracking_line_gap = DEFAULT_VHS_TRACKING_LINE_GAP_PX;
-	int vhs_tracking_min_thickness = DEFAULT_VHS_TRACKING_MIN_THICKNESS_PX;
-	int vhs_tracking_max_thickness = DEFAULT_VHS_TRACKING_MAX_THICKNESS_PX;
-	double vhs_tracking_jitter_min = DEFAULT_VHS_TRACKING_JITTER_MIN_PX;
-	double vhs_tracking_jitter_max = DEFAULT_VHS_TRACKING_JITTER_MAX_PX;
-	double vhs_tracking_brighten = DEFAULT_VHS_TRACKING_BRIGHTEN;
-	double vhs_chroma_max_offset = DEFAULT_VHS_CHROMA_MAX_OFFSET_PX;
-	double vhs_chroma_vertical_jitter = DEFAULT_VHS_CHROMA_VERTICAL_JITTER;
-	int vhs_glitch_chance_pct = DEFAULT_VHS_GLITCH_CHANCE_PCT;
-	int vhs_glitch_max_bands = DEFAULT_VHS_GLITCH_MAX_BANDS;
-	int vhs_grain_amount = DEFAULT_VHS_GRAIN_AMOUNT;
 	std::chrono::steady_clock::time_point last_vhs_tick{};
 	std::mt19937 vhs_rng{std::random_device{}()};
 	int vhs_scanline_offset = 0;
@@ -793,18 +840,6 @@ struct spotify_source {
 	float vhs_tracking_shift_dir[VHS_TRACKING_LINE_ARRAY_CAP] = {0.0f};
 	std::chrono::steady_clock::time_point vhs_tracking_next_start{};
 
-	int eightmm_intensity = DEFAULT_EIGHTMM_INTENSITY;
-	double eightmm_vignette_strength = DEFAULT_EIGHTMM_VIGNETTE_STRENGTH;
-	double eightmm_warmth = DEFAULT_EIGHTMM_WARMTH;
-	double eightmm_light_leak_alpha = DEFAULT_EIGHTMM_LIGHT_LEAK_ALPHA;
-	std::string eightmm_light_leak_position = DEFAULT_EIGHTMM_LIGHT_LEAK_POSITION;
-	int eightmm_light_leak_intensity = DEFAULT_EIGHTMM_LIGHT_LEAK_INTENSITY;
-	double eightmm_weave_px = DEFAULT_EIGHTMM_WEAVE_PX;
-	double eightmm_flicker = DEFAULT_EIGHTMM_FLICKER;
-	int eightmm_scratch_intensity = DEFAULT_EIGHTMM_SCRATCH_INTENSITY;
-	int eightmm_dust_intensity = DEFAULT_EIGHTMM_DUST_INTENSITY;
-	int eightmm_scratch_max_count = DEFAULT_EIGHTMM_SCRATCH_MAX_COUNT;
-	int eightmm_dust_max_count = DEFAULT_EIGHTMM_DUST_MAX_COUNT;
 	std::chrono::steady_clock::time_point last_eightmm_tick{};
 	std::mt19937 eightmm_rng{std::random_device{}()};
 	int eightmm_noise_offset_x = 0;
@@ -813,27 +848,6 @@ struct spotify_source {
 	float eightmm_flicker_offset = 0.0f;
 	std::unique_ptr<Bitmap> eightmm_noise_texture;
 
-	long long duotone_shadow_color = DEFAULT_DUOTONE_SHADOW_COLOR;
-	long long duotone_highlight_color = DEFAULT_DUOTONE_HIGHLIGHT_COLOR;
-	int duotone_intensity = DEFAULT_DUOTONE_INTENSITY;
-
-	int bw_desaturation = DEFAULT_BW_DESATURATION;
-	int bw_contrast = DEFAULT_BW_CONTRAST;
-	double bw_vignette_strength = DEFAULT_BW_VIGNETTE_STRENGTH;
-
-	int glitch_intensity = DEFAULT_GLITCH_INTENSITY;
-	int glitch_pixel_sort_chance = DEFAULT_GLITCH_PIXEL_SORT_CHANCE;
-	int glitch_pixel_sort_max_rows = DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS;
-	int glitch_pixel_sort_threshold = DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD;
-	int glitch_tear_chance = DEFAULT_GLITCH_TEAR_CHANCE;
-	int glitch_tear_max_count = DEFAULT_GLITCH_TEAR_MAX_COUNT;
-	int glitch_tear_max_height = DEFAULT_GLITCH_TEAR_MAX_HEIGHT;
-	int glitch_tear_max_offset = DEFAULT_GLITCH_TEAR_MAX_OFFSET;
-	int glitch_tear_duplicate_chance = DEFAULT_GLITCH_TEAR_DUPLICATE_CHANCE;
-	int glitch_channel_block_chance = DEFAULT_GLITCH_CHANNEL_BLOCK_CHANCE;
-	int glitch_channel_block_max_count = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_COUNT;
-	int glitch_channel_block_max_size = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_SIZE;
-	int glitch_channel_block_max_offset = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_OFFSET;
 	std::chrono::steady_clock::time_point last_glitch_tick{};
 	std::mt19937 glitch_rng{std::random_device{}()};
 	std::vector<GlitchSortRow> glitch_sort_rows;
@@ -872,115 +886,8 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_playing_time{};
 };
 
-// ---------------------------------------------------------------------
-// AppearanceSettings macro
-// ---------------------------------------------------------------------
-#define APPEARANCE_SETTINGS_FIELDS(X) \
-	X(long long, title_color) \
-	X(long long, artist_color) \
-	X(long long, bg_color) \
-	X(int, bg_opacity) \
-	X(bool, use_bg_image) \
-	X(std::string, bg_image_path) \
-	X(bool, use_album_art_as_bg) \
-	X(int, album_art_bg_blur_pct) \
-	X(int, background_corner_radius) \
-	X(int, album_art_corner_radius) \
-	X(std::string, title_font_face) \
-	X(std::string, title_font_style) \
-	X(int, title_font_size) \
-	X(int, title_font_flags) \
-	X(std::string, artist_font_face) \
-	X(std::string, artist_font_style) \
-	X(int, artist_font_size) \
-	X(int, artist_font_flags) \
-	X(int, card_w) \
-	X(int, card_h) \
-	X(int, text_offset_y) \
-	X(int, progress_bar_gap) \
-	X(int, progress_bar_height) \
-	X(int, scroll_speed_ms) \
-	X(bool, browser_media_source_enabled) \
-	X(bool, vu_meter_enabled) \
-	X(long long, vu_color) \
-	X(int, vu_update_ms) \
-	X(int, vu_randomness) \
-	X(int, vu_width) \
-	X(int, vu_height) \
-	X(int, vu_bar_count) \
-	X(bool, vu_horizontal) \
-	X(bool, vertical_layout) \
-	X(bool, show_album_name) \
-	X(bool, show_goat_placeholder) \
-	X(bool, show_plugin_attribution) \
-	X(bool, hide_album_art) \
-	X(bool, show_progress_bar) \
-	X(long long, progress_fill_color) \
-	X(long long, progress_bg_color) \
-	X(bool, track_change_animation_enabled) \
-	X(bool, autohide_enabled) \
-	X(int, autohide_after_s) \
-	X(bool, autohide_when_not_playing) \
-	X(bool, title_outline_enabled) \
-	X(int, title_outline_size) \
-	X(long long, title_outline_color) \
-	X(bool, artist_outline_enabled) \
-	X(int, artist_outline_size) \
-	X(long long, artist_outline_color) \
-	X(std::string, card_style) \
-	X(int, vhs_intensity) \
-	X(int, vhs_chroma_aberration) \
-	X(int, vhs_scanline_spacing) \
-	X(int, vhs_scanline_intensity) \
-	X(int, vhs_tracking_min_interval_s) \
-	X(int, vhs_tracking_max_interval_s) \
-	X(int, vhs_tracking_line_min_count) \
-	X(int, vhs_tracking_line_max_count) \
-	X(int, vhs_tracking_line_gap) \
-	X(int, vhs_tracking_min_thickness) \
-	X(int, vhs_tracking_max_thickness) \
-	X(double, vhs_tracking_jitter_min) \
-	X(double, vhs_tracking_jitter_max) \
-	X(double, vhs_tracking_brighten) \
-	X(double, vhs_chroma_max_offset) \
-	X(double, vhs_chroma_vertical_jitter) \
-	X(int, vhs_glitch_chance_pct) \
-	X(int, vhs_glitch_max_bands) \
-	X(int, vhs_grain_amount) \
-	X(int, eightmm_intensity) \
-	X(double, eightmm_vignette_strength) \
-	X(double, eightmm_warmth) \
-	X(double, eightmm_light_leak_alpha) \
-	X(std::string, eightmm_light_leak_position) \
-	X(int, eightmm_light_leak_intensity) \
-	X(double, eightmm_weave_px) \
-	X(double, eightmm_flicker) \
-	X(int, eightmm_scratch_intensity) \
-	X(int, eightmm_dust_intensity) \
-	X(int, eightmm_scratch_max_count) \
-	X(int, eightmm_dust_max_count) \
-	X(long long, duotone_shadow_color) \
-	X(long long, duotone_highlight_color) \
-	X(int, duotone_intensity) \
-	X(int, bw_desaturation) \
-	X(int, bw_contrast) \
-	X(double, bw_vignette_strength) \
-	X(int, glitch_intensity) \
-	X(int, glitch_pixel_sort_chance) \
-	X(int, glitch_pixel_sort_max_rows) \
-	X(int, glitch_pixel_sort_threshold) \
-	X(int, glitch_tear_chance) \
-	X(int, glitch_tear_max_count) \
-	X(int, glitch_tear_max_height) \
-	X(int, glitch_tear_max_offset) \
-	X(int, glitch_tear_duplicate_chance) \
-	X(int, glitch_channel_block_chance) \
-	X(int, glitch_channel_block_max_count) \
-	X(int, glitch_channel_block_max_size) \
-	X(int, glitch_channel_block_max_offset)
-
 struct AppearanceSettings {
-#define X(type, name) type name;
+#define X(type, name, def) type name = def;
 	APPEARANCE_SETTINGS_FIELDS(X)
 #undef X
 };
@@ -2122,7 +2029,7 @@ static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
 	AppearanceSettings s;
-#define X(type, name) s.name = ctx->name;
+#define X(type, name, def) s.name = ctx->name;
 	APPEARANCE_SETTINGS_FIELDS(X)
 #undef X
 	return s;
