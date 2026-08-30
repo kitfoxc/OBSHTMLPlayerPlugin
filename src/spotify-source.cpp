@@ -131,7 +131,7 @@ constexpr double DEFAULT_BW_VIGNETTE_STRENGTH = 0.0;
 
 constexpr int DEFAULT_GLITCH_INTENSITY = 50;
 constexpr int DEFAULT_GLITCH_PIXEL_SORT_CHANCE = 15;    // 0..100
-constexpr int DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS = 6;   
+constexpr int DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS = 6;
 constexpr int DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD = 35; // 0..100
 constexpr int DEFAULT_GLITCH_TEAR_CHANCE = 20;          // 0..100
 constexpr int DEFAULT_GLITCH_TEAR_MAX_COUNT = 3;
@@ -641,13 +641,13 @@ struct GlitchSortRow {
 struct GlitchTear {
 	int y = 0;
 	int h = 0;
-	int offsetX = 0; 
-	int srcY = 0;    
+	int offsetX = 0;
+	int srcY = 0;
 };
 
 struct GlitchChannelBlock {
 	int x = 0, y = 0, w = 0, h = 0;
-	int channel = 0; 
+	int channel = 0;
 	int offsetX = 0, offsetY = 0;
 };
 
@@ -872,109 +872,117 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_playing_time{};
 };
 
+// ---------------------------------------------------------------------
+// AppearanceSettings macro
+// ---------------------------------------------------------------------
+#define APPEARANCE_SETTINGS_FIELDS(X) \
+	X(long long, title_color) \
+	X(long long, artist_color) \
+	X(long long, bg_color) \
+	X(int, bg_opacity) \
+	X(bool, use_bg_image) \
+	X(std::string, bg_image_path) \
+	X(bool, use_album_art_as_bg) \
+	X(int, album_art_bg_blur_pct) \
+	X(int, background_corner_radius) \
+	X(int, album_art_corner_radius) \
+	X(std::string, title_font_face) \
+	X(std::string, title_font_style) \
+	X(int, title_font_size) \
+	X(int, title_font_flags) \
+	X(std::string, artist_font_face) \
+	X(std::string, artist_font_style) \
+	X(int, artist_font_size) \
+	X(int, artist_font_flags) \
+	X(int, card_w) \
+	X(int, card_h) \
+	X(int, text_offset_y) \
+	X(int, progress_bar_gap) \
+	X(int, progress_bar_height) \
+	X(int, scroll_speed_ms) \
+	X(bool, browser_media_source_enabled) \
+	X(bool, vu_meter_enabled) \
+	X(long long, vu_color) \
+	X(int, vu_update_ms) \
+	X(int, vu_randomness) \
+	X(int, vu_width) \
+	X(int, vu_height) \
+	X(int, vu_bar_count) \
+	X(bool, vu_horizontal) \
+	X(bool, vertical_layout) \
+	X(bool, show_album_name) \
+	X(bool, show_goat_placeholder) \
+	X(bool, show_plugin_attribution) \
+	X(bool, hide_album_art) \
+	X(bool, show_progress_bar) \
+	X(long long, progress_fill_color) \
+	X(long long, progress_bg_color) \
+	X(bool, track_change_animation_enabled) \
+	X(bool, autohide_enabled) \
+	X(int, autohide_after_s) \
+	X(bool, autohide_when_not_playing) \
+	X(bool, title_outline_enabled) \
+	X(int, title_outline_size) \
+	X(long long, title_outline_color) \
+	X(bool, artist_outline_enabled) \
+	X(int, artist_outline_size) \
+	X(long long, artist_outline_color) \
+	X(std::string, card_style) \
+	X(int, vhs_intensity) \
+	X(int, vhs_chroma_aberration) \
+	X(int, vhs_scanline_spacing) \
+	X(int, vhs_scanline_intensity) \
+	X(int, vhs_tracking_min_interval_s) \
+	X(int, vhs_tracking_max_interval_s) \
+	X(int, vhs_tracking_line_min_count) \
+	X(int, vhs_tracking_line_max_count) \
+	X(int, vhs_tracking_line_gap) \
+	X(int, vhs_tracking_min_thickness) \
+	X(int, vhs_tracking_max_thickness) \
+	X(double, vhs_tracking_jitter_min) \
+	X(double, vhs_tracking_jitter_max) \
+	X(double, vhs_tracking_brighten) \
+	X(double, vhs_chroma_max_offset) \
+	X(double, vhs_chroma_vertical_jitter) \
+	X(int, vhs_glitch_chance_pct) \
+	X(int, vhs_glitch_max_bands) \
+	X(int, vhs_grain_amount) \
+	X(int, eightmm_intensity) \
+	X(double, eightmm_vignette_strength) \
+	X(double, eightmm_warmth) \
+	X(double, eightmm_light_leak_alpha) \
+	X(std::string, eightmm_light_leak_position) \
+	X(int, eightmm_light_leak_intensity) \
+	X(double, eightmm_weave_px) \
+	X(double, eightmm_flicker) \
+	X(int, eightmm_scratch_intensity) \
+	X(int, eightmm_dust_intensity) \
+	X(int, eightmm_scratch_max_count) \
+	X(int, eightmm_dust_max_count) \
+	X(long long, duotone_shadow_color) \
+	X(long long, duotone_highlight_color) \
+	X(int, duotone_intensity) \
+	X(int, bw_desaturation) \
+	X(int, bw_contrast) \
+	X(double, bw_vignette_strength) \
+	X(int, glitch_intensity) \
+	X(int, glitch_pixel_sort_chance) \
+	X(int, glitch_pixel_sort_max_rows) \
+	X(int, glitch_pixel_sort_threshold) \
+	X(int, glitch_tear_chance) \
+	X(int, glitch_tear_max_count) \
+	X(int, glitch_tear_max_height) \
+	X(int, glitch_tear_max_offset) \
+	X(int, glitch_tear_duplicate_chance) \
+	X(int, glitch_channel_block_chance) \
+	X(int, glitch_channel_block_max_count) \
+	X(int, glitch_channel_block_max_size) \
+	X(int, glitch_channel_block_max_offset)
+
 struct AppearanceSettings {
-	long long title_color;
-	long long artist_color;
-	long long bg_color;
-	int bg_opacity;
-	bool use_bg_image;
-	std::string bg_image_path;
-	bool use_album_art_as_bg;
-	int album_art_bg_blur_pct;
-	int background_corner_radius;
-	int album_art_corner_radius;
-	std::string title_font_face;
-	std::string title_font_style;
-	int title_font_size;
-	int title_font_flags;
-	std::string artist_font_face;
-	std::string artist_font_style;
-	int artist_font_size;
-	int artist_font_flags;
-	int card_w;
-	int card_h;
-	int text_offset_y;
-	int progress_bar_gap;
-	int progress_bar_height;
-	int scroll_speed_ms;
-	bool browser_media_source_enabled;
-	bool vu_meter_enabled;
-	long long vu_color;
-	int vu_update_ms;
-	int vu_randomness;
-	int vu_width;
-	int vu_height;
-	int vu_bar_count;
-	bool vu_horizontal;
-	bool vertical_layout;
-	bool show_album_name;
-	bool show_goat_placeholder;
-	bool show_plugin_attribution;
-	bool hide_album_art;
-	bool show_progress_bar;
-	long long progress_fill_color;
-	long long progress_bg_color;
-	bool track_change_animation_enabled;
-	bool autohide_enabled;
-	int autohide_after_s;
-	bool autohide_when_not_playing;
-	bool title_outline_enabled;
-	int title_outline_size;
-	long long title_outline_color;
-	bool artist_outline_enabled;
-	int artist_outline_size;
-	long long artist_outline_color;
-	std::string card_style;
-	int vhs_intensity;
-	int vhs_chroma_aberration;
-	int vhs_scanline_spacing;
-	int vhs_scanline_intensity;
-	int vhs_tracking_min_interval_s;
-	int vhs_tracking_max_interval_s;
-	int vhs_tracking_line_min_count;
-	int vhs_tracking_line_max_count;
-	int vhs_tracking_line_gap;
-	int vhs_tracking_min_thickness;
-	int vhs_tracking_max_thickness;
-	double vhs_tracking_jitter_min;
-	double vhs_tracking_jitter_max;
-	double vhs_tracking_brighten;
-	double vhs_chroma_max_offset;
-	double vhs_chroma_vertical_jitter;
-	int vhs_glitch_chance_pct;
-	int vhs_glitch_max_bands;
-	int vhs_grain_amount;
-	int eightmm_intensity;
-	double eightmm_vignette_strength;
-	double eightmm_warmth;
-	double eightmm_light_leak_alpha;
-	std::string eightmm_light_leak_position;
-	int eightmm_light_leak_intensity;
-	double eightmm_weave_px;
-	double eightmm_flicker;
-	int eightmm_scratch_intensity;
-	int eightmm_dust_intensity;
-	int eightmm_scratch_max_count;
-	int eightmm_dust_max_count;
-	long long duotone_shadow_color;
-	long long duotone_highlight_color;
-	int duotone_intensity;
-	int bw_desaturation;
-	int bw_contrast;
-	double bw_vignette_strength;
-	int glitch_intensity;
-	int glitch_pixel_sort_chance;
-	int glitch_pixel_sort_max_rows;
-	int glitch_pixel_sort_threshold;
-	int glitch_tear_chance;
-	int glitch_tear_max_count;
-	int glitch_tear_max_height;
-	int glitch_tear_max_offset;
-	int glitch_tear_duplicate_chance;
-	int glitch_channel_block_chance;
-	int glitch_channel_block_max_count;
-	int glitch_channel_block_max_size;
-	int glitch_channel_block_max_offset;
+#define X(type, name) type name;
+	APPEARANCE_SETTINGS_FIELDS(X)
+#undef X
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -2113,7 +2121,11 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->use_album_art_as_bg, ctx->album_art_bg_blur_pct, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color, ctx->card_style, ctx->vhs_intensity, ctx->vhs_chroma_aberration, ctx->vhs_scanline_spacing, ctx->vhs_scanline_intensity, ctx->vhs_tracking_min_interval_s, ctx->vhs_tracking_max_interval_s, ctx->vhs_tracking_line_min_count, ctx->vhs_tracking_line_max_count, ctx->vhs_tracking_line_gap, ctx->vhs_tracking_min_thickness, ctx->vhs_tracking_max_thickness, ctx->vhs_tracking_jitter_min, ctx->vhs_tracking_jitter_max, ctx->vhs_tracking_brighten, ctx->vhs_chroma_max_offset, ctx->vhs_chroma_vertical_jitter, ctx->vhs_glitch_chance_pct, ctx->vhs_glitch_max_bands, ctx->vhs_grain_amount, ctx->eightmm_intensity, ctx->eightmm_vignette_strength, ctx->eightmm_warmth, ctx->eightmm_light_leak_alpha, ctx->eightmm_light_leak_position, ctx->eightmm_light_leak_intensity, ctx->eightmm_weave_px, ctx->eightmm_flicker, ctx->eightmm_scratch_intensity, ctx->eightmm_dust_intensity, ctx->eightmm_scratch_max_count, ctx->eightmm_dust_max_count, ctx->duotone_shadow_color, ctx->duotone_highlight_color, ctx->duotone_intensity, ctx->bw_desaturation, ctx->bw_contrast, ctx->bw_vignette_strength, ctx->glitch_intensity, ctx->glitch_pixel_sort_chance, ctx->glitch_pixel_sort_max_rows, ctx->glitch_pixel_sort_threshold, ctx->glitch_tear_chance, ctx->glitch_tear_max_count, ctx->glitch_tear_max_height, ctx->glitch_tear_max_offset, ctx->glitch_tear_duplicate_chance, ctx->glitch_channel_block_chance, ctx->glitch_channel_block_max_count, ctx->glitch_channel_block_max_size, ctx->glitch_channel_block_max_offset};
+	AppearanceSettings s;
+#define X(type, name) s.name = ctx->name;
+	APPEARANCE_SETTINGS_FIELDS(X)
+#undef X
+	return s;
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
