@@ -38,6 +38,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <winrt/Windows.Storage.Streams.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -94,41 +95,53 @@ constexpr int DEFAULT_VHS_TRACKING_MIN_INTERVAL_S = 6;
 constexpr int DEFAULT_VHS_TRACKING_MAX_INTERVAL_S = 10;
 constexpr int DEFAULT_VHS_TRACKING_LINE_MIN_COUNT = 2;
 constexpr int DEFAULT_VHS_TRACKING_LINE_MAX_COUNT = 3;
-constexpr int VHS_TRACKING_LINE_ARRAY_CAP = 8;      
-constexpr int DEFAULT_VHS_TRACKING_LINE_GAP_PX = 3; 
+constexpr int VHS_TRACKING_LINE_ARRAY_CAP = 8;
+constexpr int DEFAULT_VHS_TRACKING_LINE_GAP_PX = 3;
 constexpr int DEFAULT_VHS_TRACKING_MIN_THICKNESS_PX = 2;
 constexpr int DEFAULT_VHS_TRACKING_MAX_THICKNESS_PX = 4;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MIN_PX = 1.0;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MAX_PX = 4.5;
 constexpr double DEFAULT_VHS_TRACKING_BRIGHTEN = 0.00; // 0..1
-constexpr double DEFAULT_VHS_CHROMA_MAX_OFFSET_PX = 6.0;     
+constexpr double DEFAULT_VHS_CHROMA_MAX_OFFSET_PX = 6.0;
 constexpr double DEFAULT_VHS_CHROMA_VERTICAL_JITTER = 0.015;
-constexpr int DEFAULT_VHS_GLITCH_CHANCE_PCT = 8; 
+constexpr int DEFAULT_VHS_GLITCH_CHANCE_PCT = 8;
 constexpr int DEFAULT_VHS_GLITCH_MAX_BANDS = 4;
-constexpr int DEFAULT_VHS_GRAIN_AMOUNT = 50; 
+constexpr int DEFAULT_VHS_GRAIN_AMOUNT = 50;
 
 constexpr int DEFAULT_EIGHTMM_INTENSITY = 50;
 constexpr double DEFAULT_EIGHTMM_VIGNETTE_STRENGTH = 0.55;
-constexpr double DEFAULT_EIGHTMM_WARMTH = 18.0; // out of 255
+constexpr double DEFAULT_EIGHTMM_WARMTH = 18.0; // max 255
 constexpr double DEFAULT_EIGHTMM_LIGHT_LEAK_ALPHA = 0.50;
-constexpr double DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MIN = 0.35;
-constexpr double DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MAX = 0.65;
-constexpr int DEFAULT_EIGHTMM_LIGHT_LEAK_MIN_INTERVAL_S = 2;
-constexpr int DEFAULT_EIGHTMM_LIGHT_LEAK_MAX_INTERVAL_S = 4;
-constexpr double DEFAULT_EIGHTMM_WEAVE_PX = 0.2;      
-constexpr double DEFAULT_EIGHTMM_FLICKER = 0.18;      // 0..1, max per-tick brightness flicker
+constexpr const char *DEFAULT_EIGHTMM_LIGHT_LEAK_POSITION = "none";
+constexpr int DEFAULT_EIGHTMM_LIGHT_LEAK_INTENSITY = 50; // 1..100
+constexpr double DEFAULT_EIGHTMM_WEAVE_PX = 0.2;
+constexpr double DEFAULT_EIGHTMM_FLICKER = 0.18;      // 0..1
 constexpr int DEFAULT_EIGHTMM_SCRATCH_INTENSITY = 45; // 0..100
 constexpr int DEFAULT_EIGHTMM_DUST_INTENSITY = 45;    // 0..100
 constexpr int DEFAULT_EIGHTMM_SCRATCH_MAX_COUNT = 14;
-constexpr int DEFAULT_EIGHTMM_DUST_MAX_COUNT = 150;  
+constexpr int DEFAULT_EIGHTMM_DUST_MAX_COUNT = 150;
 
 constexpr int DEFAULT_DUOTONE_INTENSITY = 100;
 constexpr int DEFAULT_DUOTONE_SHADOW_COLOR = 0xFF1B1035;
 constexpr int DEFAULT_DUOTONE_HIGHLIGHT_COLOR = 0xFFFF5FA2;
 
-constexpr int DEFAULT_BW_DESATURATION = 100;         
-constexpr int DEFAULT_BW_CONTRAST = 20;              
-constexpr double DEFAULT_BW_VIGNETTE_STRENGTH = 0.0; 
+constexpr int DEFAULT_BW_DESATURATION = 100;
+constexpr int DEFAULT_BW_CONTRAST = 20;
+constexpr double DEFAULT_BW_VIGNETTE_STRENGTH = 0.0;
+
+constexpr int DEFAULT_GLITCH_INTENSITY = 50;
+constexpr int DEFAULT_GLITCH_PIXEL_SORT_CHANCE = 15;    // 0..100
+constexpr int DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS = 6;   
+constexpr int DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD = 35; // 0..100
+constexpr int DEFAULT_GLITCH_TEAR_CHANCE = 20;          // 0..100
+constexpr int DEFAULT_GLITCH_TEAR_MAX_COUNT = 3;
+constexpr int DEFAULT_GLITCH_TEAR_MAX_HEIGHT = 14;       // px
+constexpr int DEFAULT_GLITCH_TEAR_MAX_OFFSET = 30;       // px
+constexpr int DEFAULT_GLITCH_TEAR_DUPLICATE_CHANCE = 35; // 0..100
+constexpr int DEFAULT_GLITCH_CHANNEL_BLOCK_CHANCE = 20;  // 0..100
+constexpr int DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_COUNT = 4;
+constexpr int DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_SIZE = 40;   // px
+constexpr int DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_OFFSET = 12; // px
 
 constexpr int VU_MAX_BAR_COUNT = 50;
 constexpr int VU_BAR_GAP = 3;
@@ -136,7 +149,7 @@ constexpr int VU_GAP_BEFORE_TEXT = 10;
 
 constexpr int DEFAULT_PROGRESS_BAR_HEIGHT = 6;
 constexpr int DEFAULT_PROGRESS_BAR_GAP = 6; // gap between artist text and the bar
-constexpr int PROGRESS_UPDATE_MS = 1000;    // how often the bar redraws while a track is loaded
+constexpr int PROGRESS_UPDATE_MS = 1000;    // how often the bar redraws
 
 constexpr int TRACK_CHANGE_TRANSITION_MS = 300;
 
@@ -620,6 +633,24 @@ void ScaleAlphaChannel(std::vector<uint8_t> &pixels, float alpha)
 		pixels[i] = (uint8_t)(((int)pixels[i] * mul) / 255);
 }
 
+struct GlitchSortRow {
+	int y = 0;
+	float center = 128.0f; // 0..255
+};
+
+struct GlitchTear {
+	int y = 0;
+	int h = 0;
+	int offsetX = 0; 
+	int srcY = 0;    
+};
+
+struct GlitchChannelBlock {
+	int x = 0, y = 0, w = 0, h = 0;
+	int channel = 0; 
+	int offsetX = 0, offsetY = 0;
+};
+
 } // namespace
 
 struct spotify_source {
@@ -724,7 +755,7 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_vu_tick{};
 	std::mt19937 vu_rng{std::random_device{}()};
 
-	std::string card_style = "none"; // "none", "vhs", "8mm", "duotone"
+	std::string card_style = "none"; // "none", "vhs", "8mm", "duotone", "bw", "glitch"
 
 	int vhs_intensity = DEFAULT_VHS_INTENSITY;
 	int vhs_chroma_aberration = DEFAULT_VHS_CHROMA_ABERRATION;
@@ -766,10 +797,8 @@ struct spotify_source {
 	double eightmm_vignette_strength = DEFAULT_EIGHTMM_VIGNETTE_STRENGTH;
 	double eightmm_warmth = DEFAULT_EIGHTMM_WARMTH;
 	double eightmm_light_leak_alpha = DEFAULT_EIGHTMM_LIGHT_LEAK_ALPHA;
-	double eightmm_light_leak_radius_min = DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MIN;
-	double eightmm_light_leak_radius_max = DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MAX;
-	int eightmm_light_leak_min_interval_s = DEFAULT_EIGHTMM_LIGHT_LEAK_MIN_INTERVAL_S;
-	int eightmm_light_leak_max_interval_s = DEFAULT_EIGHTMM_LIGHT_LEAK_MAX_INTERVAL_S;
+	std::string eightmm_light_leak_position = DEFAULT_EIGHTMM_LIGHT_LEAK_POSITION;
+	int eightmm_light_leak_intensity = DEFAULT_EIGHTMM_LIGHT_LEAK_INTENSITY;
 	double eightmm_weave_px = DEFAULT_EIGHTMM_WEAVE_PX;
 	double eightmm_flicker = DEFAULT_EIGHTMM_FLICKER;
 	int eightmm_scratch_intensity = DEFAULT_EIGHTMM_SCRATCH_INTENSITY;
@@ -780,9 +809,6 @@ struct spotify_source {
 	std::mt19937 eightmm_rng{std::random_device{}()};
 	int eightmm_noise_offset_x = 0;
 	int eightmm_noise_offset_y = 0;
-	float eightmm_leak_x = 0.2f, eightmm_leak_y = 0.2f;
-	float eightmm_leak_radius = 0.4f;
-	std::chrono::steady_clock::time_point eightmm_leak_next_shift{};
 	float eightmm_weave_offset = 0.0f;
 	float eightmm_flicker_offset = 0.0f;
 	std::unique_ptr<Bitmap> eightmm_noise_texture;
@@ -794,6 +820,25 @@ struct spotify_source {
 	int bw_desaturation = DEFAULT_BW_DESATURATION;
 	int bw_contrast = DEFAULT_BW_CONTRAST;
 	double bw_vignette_strength = DEFAULT_BW_VIGNETTE_STRENGTH;
+
+	int glitch_intensity = DEFAULT_GLITCH_INTENSITY;
+	int glitch_pixel_sort_chance = DEFAULT_GLITCH_PIXEL_SORT_CHANCE;
+	int glitch_pixel_sort_max_rows = DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS;
+	int glitch_pixel_sort_threshold = DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD;
+	int glitch_tear_chance = DEFAULT_GLITCH_TEAR_CHANCE;
+	int glitch_tear_max_count = DEFAULT_GLITCH_TEAR_MAX_COUNT;
+	int glitch_tear_max_height = DEFAULT_GLITCH_TEAR_MAX_HEIGHT;
+	int glitch_tear_max_offset = DEFAULT_GLITCH_TEAR_MAX_OFFSET;
+	int glitch_tear_duplicate_chance = DEFAULT_GLITCH_TEAR_DUPLICATE_CHANCE;
+	int glitch_channel_block_chance = DEFAULT_GLITCH_CHANNEL_BLOCK_CHANCE;
+	int glitch_channel_block_max_count = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_COUNT;
+	int glitch_channel_block_max_size = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_SIZE;
+	int glitch_channel_block_max_offset = DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_OFFSET;
+	std::chrono::steady_clock::time_point last_glitch_tick{};
+	std::mt19937 glitch_rng{std::random_device{}()};
+	std::vector<GlitchSortRow> glitch_sort_rows;
+	std::vector<GlitchTear> glitch_tears;
+	std::vector<GlitchChannelBlock> glitch_channel_blocks;
 
 	int64_t song_duration_ticks = 0; // .NET TimeSpan ticks (100ns each)
 	int64_t playback_position_ticks = 0;
@@ -903,10 +948,8 @@ struct AppearanceSettings {
 	double eightmm_vignette_strength;
 	double eightmm_warmth;
 	double eightmm_light_leak_alpha;
-	double eightmm_light_leak_radius_min;
-	double eightmm_light_leak_radius_max;
-	int eightmm_light_leak_min_interval_s;
-	int eightmm_light_leak_max_interval_s;
+	std::string eightmm_light_leak_position;
+	int eightmm_light_leak_intensity;
 	double eightmm_weave_px;
 	double eightmm_flicker;
 	int eightmm_scratch_intensity;
@@ -919,6 +962,19 @@ struct AppearanceSettings {
 	int bw_desaturation;
 	int bw_contrast;
 	double bw_vignette_strength;
+	int glitch_intensity;
+	int glitch_pixel_sort_chance;
+	int glitch_pixel_sort_max_rows;
+	int glitch_pixel_sort_threshold;
+	int glitch_tear_chance;
+	int glitch_tear_max_count;
+	int glitch_tear_max_height;
+	int glitch_tear_max_offset;
+	int glitch_tear_duplicate_chance;
+	int glitch_channel_block_chance;
+	int glitch_channel_block_max_count;
+	int glitch_channel_block_max_size;
+	int glitch_channel_block_max_offset;
 };
 
 static void DrawVuMeter(Graphics &g, spotify_source *ctx, const AppearanceSettings &s, const Rect &blockRect)
@@ -1411,10 +1467,26 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 
 	g.SetClip(&clipPath);
 
-	{
-		REAL leakCx = ctx->eightmm_leak_x * cardW;
-		REAL leakCy = ctx->eightmm_leak_y * cardH;
-		REAL leakR = ctx->eightmm_leak_radius * std::max(cardW, cardH);
+	if (s.eightmm_light_leak_position != "none") {
+		REAL leakCx = 0.0f, leakCy = 0.0f;
+		if (s.eightmm_light_leak_position == "top_left") {
+			leakCx = 0.0f;
+			leakCy = 0.0f;
+		} else if (s.eightmm_light_leak_position == "top_right") {
+			leakCx = (REAL)cardW;
+			leakCy = 0.0f;
+		} else if (s.eightmm_light_leak_position == "bottom_left") {
+			leakCx = 0.0f;
+			leakCy = (REAL)cardH;
+		} else if (s.eightmm_light_leak_position == "bottom_right") {
+			leakCx = (REAL)cardW;
+			leakCy = (REAL)cardH;
+		}
+
+		REAL diag = (REAL)std::sqrt((double)cardW * (double)cardW + (double)cardH * (double)cardH);
+		REAL leakT = std::clamp(s.eightmm_light_leak_intensity, 1, 100) / 100.0f;
+		REAL leakR = diag * (0.06f + 0.94f * leakT);
+
 		GraphicsPath leakPath;
 		leakPath.AddEllipse(leakCx - leakR, leakCy - leakR, leakR * 2.0f, leakR * 2.0f);
 		PathGradientBrush leakBrush(&leakPath);
@@ -1452,7 +1524,7 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 		noiseBrush.SetTransform(&m);
 		g.FillRectangle(&noiseBrush, Rect(0, 0, cardW, cardH));
 	}
-		
+
 	auto expectedCountRoll = [&](double expected) -> int {
 		int whole = (int)std::floor(expected);
 		double frac = expected - whole;
@@ -1654,6 +1726,125 @@ static void DrawBwOverlay(Graphics &g, Bitmap &card, GraphicsPath &clipPath, int
 	}
 }
 
+static void DrawGlitchOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, GraphicsPath &clipPath, int cardW, int cardH, const AppearanceSettings &s)
+{
+	REAL t = std::clamp(s.glitch_intensity, 0, 100) / 100.0f;
+	if (t <= 0.0f || cardW <= 0 || cardH <= 0)
+		return;
+
+	Region savedClip;
+	g.GetClip(&savedClip);
+	g.SetClip(&clipPath);
+
+	if (!ctx->glitch_tears.empty() && cardH > 0) {
+		std::unique_ptr<Bitmap> tearSnap(card.Clone(0, 0, cardW, cardH, PixelFormat32bppARGB));
+		if (tearSnap) {
+			for (const auto &tear : ctx->glitch_tears) {
+				int h = std::clamp(tear.h, 1, cardH);
+				int y = std::clamp(tear.y, 0, cardH - h);
+				int srcY = std::clamp(tear.srcY, 0, cardH - h);
+				REAL offsetPx = (REAL)tear.offsetX * t;
+				RectF destBand(offsetPx, (REAL)y, (REAL)cardW, (REAL)h);
+				g.DrawImage(tearSnap.get(), destBand, 0.0f, (REAL)srcY, (REAL)cardW, (REAL)h, UnitPixel, nullptr);
+			}
+		}
+	}
+
+	if (!ctx->glitch_channel_blocks.empty()) {
+		BitmapData bd;
+		Rect full(0, 0, cardW, cardH);
+		if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
+			std::vector<uint8_t> src((size_t)cardW * cardH * 4);
+			const uint8_t *srcRow = (const uint8_t *)bd.Scan0;
+			for (int y = 0; y < cardH; y++)
+				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
+			card.UnlockBits(&bd);
+
+			if (card.LockBits(&full, ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
+				uint8_t *dstBase = (uint8_t *)bd.Scan0;
+				for (const auto &block : ctx->glitch_channel_blocks) {
+					int bw = std::clamp(block.w, 1, cardW);
+					int bh = std::clamp(block.h, 1, cardH);
+					int bx = std::clamp(block.x, 0, cardW - bw);
+					int by = std::clamp(block.y, 0, cardH - bh);
+					int channel = std::clamp(block.channel, 0, 2);
+					int dx = (int)std::lround((double)block.offsetX * t);
+					int dy = (int)std::lround((double)block.offsetY * t);
+
+					for (int y = by; y < by + bh; y++) {
+						uint8_t *row = dstBase + (size_t)y * bd.Stride;
+						for (int x = bx; x < bx + bw; x++) {
+							int sx = std::clamp(x + dx, 0, cardW - 1);
+							int sy = std::clamp(y + dy, 0, cardH - 1);
+							size_t srcIdx = ((size_t)sy * cardW + (size_t)sx) * 4;
+							row[(size_t)x * 4 + (size_t)channel] = src[srcIdx + (size_t)channel];
+						}
+					}
+				}
+				card.UnlockBits(&bd);
+			}
+		}
+	}
+
+	if (!ctx->glitch_sort_rows.empty()) {
+		BitmapData bd;
+		Rect full(0, 0, cardW, cardH);
+		if (card.LockBits(&full, ImageLockModeRead | ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
+			uint8_t *base = (uint8_t *)bd.Scan0;
+			REAL halfBand = std::clamp(s.glitch_pixel_sort_threshold, 0, 100) / 100.0f * 127.0f;
+
+			auto luminance = [](const uint8_t *px) -> REAL {
+				return 0.114f * px[0] + 0.587f * px[1] + 0.299f * px[2];
+			};
+
+			for (const auto &sortRow : ctx->glitch_sort_rows) {
+				int y = std::clamp(sortRow.y, 0, cardH - 1);
+				uint8_t *row = base + (size_t)y * bd.Stride;
+
+				REAL lower = std::clamp(sortRow.center - halfBand, 0.0f, 255.0f);
+				REAL upper = std::clamp(sortRow.center + halfBand, 0.0f, 255.0f);
+
+				int x = 0;
+				while (x < cardW) {
+					if (luminance(row + (size_t)x * 4) < lower || luminance(row + (size_t)x * 4) > upper) {
+						x++;
+						continue;
+					}
+
+					int runStart = x;
+					while (x < cardW) {
+						REAL lum = luminance(row + (size_t)x * 4);
+						if (lum < lower || lum > upper)
+							break;
+						x++;
+					}
+					int runEnd = x; // exclusive
+
+					if (runEnd - runStart >= 2) {
+						std::vector<std::array<uint8_t, 4>> px;
+						px.reserve(runEnd - runStart);
+						for (int i = runStart; i < runEnd; i++) {
+							uint8_t *p = row + (size_t)i * 4;
+							px.push_back({p[0], p[1], p[2], p[3]});
+						}
+						std::sort(px.begin(), px.end(), [](const std::array<uint8_t, 4> &a, const std::array<uint8_t, 4> &b) { return (0.114f * a[0] + 0.587f * a[1] + 0.299f * a[2]) < (0.114f * b[0] + 0.587f * b[1] + 0.299f * b[2]); });
+						for (int i = 0; i < (int)px.size(); i++) {
+							uint8_t *p = row + (size_t)(runStart + i) * 4;
+							p[0] = px[(size_t)i][0];
+							p[1] = px[(size_t)i][1];
+							p[2] = px[(size_t)i][2];
+							p[3] = px[(size_t)i][3];
+						}
+					}
+				}
+			}
+			card.UnlockBits(&bd);
+		}
+	}
+
+	g.SetClip(&savedClip);
+}
+
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
 {
 	const int cardW = std::max(s.card_w, 50);
@@ -1826,7 +2017,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		if (s.vu_meter_enabled) {
 			int vuRight = cardW - PAD;
 			int vuLeft = vuRight - s.vu_width;
-			int vuTop = (cardH - s.vu_height) / 2; 
+			int vuTop = (cardH - s.vu_height) / 2;
 			vuBlockRect = Rect(vuLeft, vuTop, s.vu_width, s.vu_height);
 		}
 
@@ -1894,6 +2085,8 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 		DrawDuotoneOverlay(card, cardW, cardH, s.duotone_shadow_color, s.duotone_highlight_color, s.duotone_intensity);
 	else if (s.card_style == "bw")
 		DrawBwOverlay(g, card, bgPath, cardW, cardH, s.bw_desaturation, s.bw_contrast, s.bw_vignette_strength);
+	else if (s.card_style == "glitch")
+		DrawGlitchOverlay(g, card, ctx, bgPath, cardW, cardH, s);
 
 	BitmapData bd;
 	Rect full(0, 0, cardW, cardH);
@@ -1920,99 +2113,7 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-	return AppearanceSettings{
-		ctx->title_color, 
-		ctx->artist_color, 
-		ctx->bg_color, 
-		ctx->bg_opacity, 
-		ctx->use_bg_image, 
-		ctx->bg_image_path, 
-		ctx->use_album_art_as_bg, 
-		ctx->album_art_bg_blur_pct, 
-		ctx->background_corner_radius, 
-		ctx->album_art_corner_radius, 
-		ctx->title_font_face, 
-		ctx->title_font_style, 
-		ctx->title_font_size, 
-		ctx->title_font_flags, 
-		ctx->artist_font_face, 
-		ctx->artist_font_style, 
-		ctx->artist_font_size, 
-		ctx->artist_font_flags, 
-		ctx->card_w, 
-		ctx->card_h, 
-		ctx->text_offset_y, 
-		ctx->progress_bar_gap, 
-		ctx->progress_bar_height, 
-		ctx->scroll_speed_ms, 
-		ctx->browser_media_source_enabled, 
-		ctx->vu_meter_enabled, 
-		ctx->vu_color, 
-		ctx->vu_update_ms, 
-		ctx->vu_randomness, 
-		ctx->vu_width, 
-		ctx->vu_height, 
-		ctx->vu_bar_count, 
-		ctx->vu_horizontal, 
-		ctx->vertical_layout, 
-		ctx->show_album_name, 
-		ctx->show_goat_placeholder, 
-		ctx->show_plugin_attribution, 
-		ctx->hide_album_art, 
-		ctx->show_progress_bar, 
-		ctx->progress_fill_color, 
-		ctx->progress_bg_color, 
-		ctx->track_change_animation_enabled, 
-		ctx->autohide_enabled, 
-		ctx->autohide_after_s, 
-		ctx->autohide_when_not_playing, 
-		ctx->title_outline_enabled, 
-		ctx->title_outline_size, 
-		ctx->title_outline_color, 
-		ctx->artist_outline_enabled, 
-		ctx->artist_outline_size, 
-		ctx->artist_outline_color, 
-		ctx->card_style, 
-		ctx->vhs_intensity, 
-		ctx->vhs_chroma_aberration, 
-		ctx->vhs_scanline_spacing, 
-		ctx->vhs_scanline_intensity, 
-		ctx->vhs_tracking_min_interval_s, 
-		ctx->vhs_tracking_max_interval_s, 
-		ctx->vhs_tracking_line_min_count, 
-		ctx->vhs_tracking_line_max_count, 
-		ctx->vhs_tracking_line_gap, 
-		ctx->vhs_tracking_min_thickness, 
-		ctx->vhs_tracking_max_thickness, 
-		ctx->vhs_tracking_jitter_min, 
-		ctx->vhs_tracking_jitter_max, 
-		ctx->vhs_tracking_brighten, 
-		ctx->vhs_chroma_max_offset, 
-		ctx->vhs_chroma_vertical_jitter, 
-		ctx->vhs_glitch_chance_pct, 
-		ctx->vhs_glitch_max_bands, 
-		ctx->vhs_grain_amount, 
-		ctx->eightmm_intensity, 
-		ctx->eightmm_vignette_strength, 
-		ctx->eightmm_warmth, 
-		ctx->eightmm_light_leak_alpha, 
-		ctx->eightmm_light_leak_radius_min, 
-		ctx->eightmm_light_leak_radius_max, 
-		ctx->eightmm_light_leak_min_interval_s, 
-		ctx->eightmm_light_leak_max_interval_s, 
-		ctx->eightmm_weave_px, 
-		ctx->eightmm_flicker, 
-		ctx->eightmm_scratch_intensity, 
-		ctx->eightmm_dust_intensity, 
-		ctx->eightmm_scratch_max_count, 
-		ctx->eightmm_dust_max_count, 
-		ctx->duotone_shadow_color, 
-		ctx->duotone_highlight_color, 
-		ctx->duotone_intensity, 
-		ctx->bw_desaturation, 
-		ctx->bw_contrast, 
-		ctx->bw_vignette_strength
-	};
+	return AppearanceSettings{ctx->title_color, ctx->artist_color, ctx->bg_color, ctx->bg_opacity, ctx->use_bg_image, ctx->bg_image_path, ctx->use_album_art_as_bg, ctx->album_art_bg_blur_pct, ctx->background_corner_radius, ctx->album_art_corner_radius, ctx->title_font_face, ctx->title_font_style, ctx->title_font_size, ctx->title_font_flags, ctx->artist_font_face, ctx->artist_font_style, ctx->artist_font_size, ctx->artist_font_flags, ctx->card_w, ctx->card_h, ctx->text_offset_y, ctx->progress_bar_gap, ctx->progress_bar_height, ctx->scroll_speed_ms, ctx->browser_media_source_enabled, ctx->vu_meter_enabled, ctx->vu_color, ctx->vu_update_ms, ctx->vu_randomness, ctx->vu_width, ctx->vu_height, ctx->vu_bar_count, ctx->vu_horizontal, ctx->vertical_layout, ctx->show_album_name, ctx->show_goat_placeholder, ctx->show_plugin_attribution, ctx->hide_album_art, ctx->show_progress_bar, ctx->progress_fill_color, ctx->progress_bg_color, ctx->track_change_animation_enabled, ctx->autohide_enabled, ctx->autohide_after_s, ctx->autohide_when_not_playing, ctx->title_outline_enabled, ctx->title_outline_size, ctx->title_outline_color, ctx->artist_outline_enabled, ctx->artist_outline_size, ctx->artist_outline_color, ctx->card_style, ctx->vhs_intensity, ctx->vhs_chroma_aberration, ctx->vhs_scanline_spacing, ctx->vhs_scanline_intensity, ctx->vhs_tracking_min_interval_s, ctx->vhs_tracking_max_interval_s, ctx->vhs_tracking_line_min_count, ctx->vhs_tracking_line_max_count, ctx->vhs_tracking_line_gap, ctx->vhs_tracking_min_thickness, ctx->vhs_tracking_max_thickness, ctx->vhs_tracking_jitter_min, ctx->vhs_tracking_jitter_max, ctx->vhs_tracking_brighten, ctx->vhs_chroma_max_offset, ctx->vhs_chroma_vertical_jitter, ctx->vhs_glitch_chance_pct, ctx->vhs_glitch_max_bands, ctx->vhs_grain_amount, ctx->eightmm_intensity, ctx->eightmm_vignette_strength, ctx->eightmm_warmth, ctx->eightmm_light_leak_alpha, ctx->eightmm_light_leak_position, ctx->eightmm_light_leak_intensity, ctx->eightmm_weave_px, ctx->eightmm_flicker, ctx->eightmm_scratch_intensity, ctx->eightmm_dust_intensity, ctx->eightmm_scratch_max_count, ctx->eightmm_dust_max_count, ctx->duotone_shadow_color, ctx->duotone_highlight_color, ctx->duotone_intensity, ctx->bw_desaturation, ctx->bw_contrast, ctx->bw_vignette_strength, ctx->glitch_intensity, ctx->glitch_pixel_sort_chance, ctx->glitch_pixel_sort_max_rows, ctx->glitch_pixel_sort_threshold, ctx->glitch_tear_chance, ctx->glitch_tear_max_count, ctx->glitch_tear_max_height, ctx->glitch_tear_max_offset, ctx->glitch_tear_duplicate_chance, ctx->glitch_channel_block_chance, ctx->glitch_channel_block_max_count, ctx->glitch_channel_block_max_size, ctx->glitch_channel_block_max_offset};
 }
 
 static bool UpdateAutohideAlpha(spotify_source *ctx, const AppearanceSettings &s, std::chrono::steady_clock::time_point now)
@@ -2414,18 +2515,68 @@ static void poll_loop(spotify_source *ctx)
 						std::uniform_real_distribution<double> flickerDist(-1.0, 1.0);
 						ctx->eightmm_flicker_offset = (float)flickerDist(ctx->eightmm_rng);
 
-						if (ctx->eightmm_leak_next_shift == std::chrono::steady_clock::time_point{} || now >= ctx->eightmm_leak_next_shift) {
-							std::uniform_real_distribution<double> posDist(0.0, 1.0);
-							double radiusMin = std::min(s.eightmm_light_leak_radius_min, s.eightmm_light_leak_radius_max);
-							double radiusMax = std::max(s.eightmm_light_leak_radius_min, s.eightmm_light_leak_radius_max);
-							std::uniform_real_distribution<double> radiusDist(radiusMin, radiusMax);
-							ctx->eightmm_leak_x = (float)posDist(ctx->eightmm_rng);
-							ctx->eightmm_leak_y = (float)posDist(ctx->eightmm_rng);
-							ctx->eightmm_leak_radius = (float)radiusDist(ctx->eightmm_rng);
-							int leakMinMs = std::max(1, s.eightmm_light_leak_min_interval_s) * 1000;
-							int leakMaxMs = std::max(leakMinMs, s.eightmm_light_leak_max_interval_s * 1000);
-							std::uniform_int_distribution<int> leakIntervalDist(leakMinMs, leakMaxMs);
-							ctx->eightmm_leak_next_shift = now + std::chrono::milliseconds(leakIntervalDist(ctx->eightmm_rng));
+						needCompose = true;
+					}
+
+					if (s.card_style == "glitch" && now - ctx->last_glitch_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
+						ctx->last_glitch_tick = now;
+
+						std::uniform_real_distribution<double> chanceDist(0.0, 1.0);
+
+						ctx->glitch_sort_rows.clear();
+						if (chanceDist(ctx->glitch_rng) < (s.glitch_pixel_sort_chance / 100.0)) {
+							std::uniform_int_distribution<int> rowCountDist(1, std::max(1, s.glitch_pixel_sort_max_rows));
+							int rowCount = rowCountDist(ctx->glitch_rng);
+							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+							std::uniform_real_distribution<double> centerDist(0.0, 255.0);
+							for (int i = 0; i < rowCount; i++) {
+								GlitchSortRow row;
+								row.y = yDist(ctx->glitch_rng);
+								row.center = (float)centerDist(ctx->glitch_rng);
+								ctx->glitch_sort_rows.push_back(row);
+							}
+						}
+
+						ctx->glitch_tears.clear();
+						if (chanceDist(ctx->glitch_rng) < (s.glitch_tear_chance / 100.0)) {
+							std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_tear_max_count));
+							int tearCount = countDist(ctx->glitch_rng);
+							std::uniform_int_distribution<int> hDist(1, std::max(1, s.glitch_tear_max_height));
+							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+							int maxOffset = std::max(0, s.glitch_tear_max_offset);
+							std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
+							for (int i = 0; i < tearCount; i++) {
+								GlitchTear tear;
+								tear.h = hDist(ctx->glitch_rng);
+								tear.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h));
+								tear.offsetX = offsetDist(ctx->glitch_rng);
+								bool duplicate = chanceDist(ctx->glitch_rng) < (s.glitch_tear_duplicate_chance / 100.0);
+								tear.srcY = duplicate ? std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h)) : tear.y;
+								ctx->glitch_tears.push_back(tear);
+							}
+						}
+
+						ctx->glitch_channel_blocks.clear();
+						if (chanceDist(ctx->glitch_rng) < (s.glitch_channel_block_chance / 100.0)) {
+							std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_channel_block_max_count));
+							int blockCount = countDist(ctx->glitch_rng);
+							std::uniform_int_distribution<int> sizeDist(2, std::max(2, s.glitch_channel_block_max_size));
+							std::uniform_int_distribution<int> xDist(0, std::max(0, s.card_w - 1));
+							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+							std::uniform_int_distribution<int> channelDist(0, 2);
+							int maxOffset = std::max(0, s.glitch_channel_block_max_offset);
+							std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
+							for (int i = 0; i < blockCount; i++) {
+								GlitchChannelBlock block;
+								block.w = sizeDist(ctx->glitch_rng);
+								block.h = sizeDist(ctx->glitch_rng);
+								block.x = std::clamp(xDist(ctx->glitch_rng), 0, std::max(0, s.card_w - block.w));
+								block.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - block.h));
+								block.channel = channelDist(ctx->glitch_rng);
+								block.offsetX = offsetDist(ctx->glitch_rng);
+								block.offsetY = offsetDist(ctx->glitch_rng);
+								ctx->glitch_channel_blocks.push_back(block);
+							}
 						}
 
 						needCompose = true;
@@ -2525,12 +2676,12 @@ static const char *spotify_source_get_name(void *)
 // Settings export / import
 //
 // These lists are the single source of truth for which settings keys get
-// backed up. Add a key here whenever a new setting is introduced  On import, 
+// backed up. Add a key here whenever a new setting is introduced  On import,
 // // a key that isn't present in the file being imported is left untouched
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur", "vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount", "eightmm_intensity", "eightmm_light_leak_min_interval_s", "eightmm_light_leak_max_interval_s", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count", "duotone_shadow_color", "duotone_highlight_color", "duotone_intensity", "bw_desaturation", "bw_contrast",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur", "vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount", "eightmm_intensity", "eightmm_light_leak_intensity", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count", "duotone_shadow_color", "duotone_highlight_color", "duotone_intensity", "bw_desaturation", "bw_contrast", "glitch_intensity", "glitch_pixel_sort_chance", "glitch_pixel_sort_max_rows", "glitch_pixel_sort_threshold", "glitch_tear_chance", "glitch_tear_max_count", "glitch_tear_max_height", "glitch_tear_max_offset", "glitch_tear_duplicate_chance", "glitch_channel_block_chance", "glitch_channel_block_max_count", "glitch_channel_block_max_size", "glitch_channel_block_max_offset",
 };
 
 static const char *const kSettingsBoolKeys[] = {
@@ -2540,10 +2691,11 @@ static const char *const kSettingsBoolKeys[] = {
 static const char *const kSettingsStringKeys[] = {
 	"bg_image_path",
 	"card_style",
+	"eightmm_light_leak_position",
 };
 
 static const char *const kSettingsDoubleKeys[] = {
-	"vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_chroma_max_offset", "vhs_chroma_vertical_jitter", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_light_leak_radius_min", "eightmm_light_leak_radius_max", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
+	"vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_chroma_max_offset", "vhs_chroma_vertical_jitter", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
 };
 
 static const char *const kSettingsObjKeys[] = {
@@ -2690,10 +2842,9 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->eightmm_vignette_strength = std::clamp(obs_data_get_double(settings, "eightmm_vignette_strength"), 0.0, 1.0);
 	ctx->eightmm_warmth = obs_data_get_double(settings, "eightmm_warmth");
 	ctx->eightmm_light_leak_alpha = std::clamp(obs_data_get_double(settings, "eightmm_light_leak_alpha"), 0.0, 1.0);
-	ctx->eightmm_light_leak_radius_min = std::clamp(obs_data_get_double(settings, "eightmm_light_leak_radius_min"), 0.0, 2.0);
-	ctx->eightmm_light_leak_radius_max = std::max(ctx->eightmm_light_leak_radius_min, std::clamp(obs_data_get_double(settings, "eightmm_light_leak_radius_max"), 0.0, 2.0));
-	ctx->eightmm_light_leak_min_interval_s = std::max(1, (int)obs_data_get_int(settings, "eightmm_light_leak_min_interval_s"));
-	ctx->eightmm_light_leak_max_interval_s = std::max(ctx->eightmm_light_leak_min_interval_s, (int)obs_data_get_int(settings, "eightmm_light_leak_max_interval_s"));
+	const char *eightmm_light_leak_position = obs_data_get_string(settings, "eightmm_light_leak_position");
+	ctx->eightmm_light_leak_position = (eightmm_light_leak_position && eightmm_light_leak_position[0]) ? eightmm_light_leak_position : "none";
+	ctx->eightmm_light_leak_intensity = std::clamp((int)obs_data_get_int(settings, "eightmm_light_leak_intensity"), 1, 100);
 	ctx->eightmm_weave_px = std::max(0.0, obs_data_get_double(settings, "eightmm_weave_px"));
 	ctx->eightmm_flicker = std::clamp(obs_data_get_double(settings, "eightmm_flicker"), 0.0, 1.0);
 	ctx->eightmm_scratch_intensity = std::clamp((int)obs_data_get_int(settings, "eightmm_scratch_intensity"), 0, 100);
@@ -2709,6 +2860,20 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->bw_desaturation = std::clamp((int)obs_data_get_int(settings, "bw_desaturation"), 0, 100);
 	ctx->bw_contrast = std::clamp((int)obs_data_get_int(settings, "bw_contrast"), -100, 100);
 	ctx->bw_vignette_strength = std::clamp(obs_data_get_double(settings, "bw_vignette_strength"), 0.0, 1.0);
+
+	ctx->glitch_intensity = std::clamp((int)obs_data_get_int(settings, "glitch_intensity"), 0, 100);
+	ctx->glitch_pixel_sort_chance = std::clamp((int)obs_data_get_int(settings, "glitch_pixel_sort_chance"), 0, 100);
+	ctx->glitch_pixel_sort_max_rows = std::max(1, (int)obs_data_get_int(settings, "glitch_pixel_sort_max_rows"));
+	ctx->glitch_pixel_sort_threshold = std::clamp((int)obs_data_get_int(settings, "glitch_pixel_sort_threshold"), 0, 100);
+	ctx->glitch_tear_chance = std::clamp((int)obs_data_get_int(settings, "glitch_tear_chance"), 0, 100);
+	ctx->glitch_tear_max_count = std::max(0, (int)obs_data_get_int(settings, "glitch_tear_max_count"));
+	ctx->glitch_tear_max_height = std::max(1, (int)obs_data_get_int(settings, "glitch_tear_max_height"));
+	ctx->glitch_tear_max_offset = std::max(0, (int)obs_data_get_int(settings, "glitch_tear_max_offset"));
+	ctx->glitch_tear_duplicate_chance = std::clamp((int)obs_data_get_int(settings, "glitch_tear_duplicate_chance"), 0, 100);
+	ctx->glitch_channel_block_chance = std::clamp((int)obs_data_get_int(settings, "glitch_channel_block_chance"), 0, 100);
+	ctx->glitch_channel_block_max_count = std::max(0, (int)obs_data_get_int(settings, "glitch_channel_block_max_count"));
+	ctx->glitch_channel_block_max_size = std::max(1, (int)obs_data_get_int(settings, "glitch_channel_block_max_size"));
+	ctx->glitch_channel_block_max_offset = std::max(0, (int)obs_data_get_int(settings, "glitch_channel_block_max_offset"));
 
 	ctx->bg_color = obs_data_get_int(settings, "bg_color");
 
@@ -2861,10 +3026,8 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "eightmm_vignette_strength", DEFAULT_EIGHTMM_VIGNETTE_STRENGTH);
 	obs_data_set_default_double(settings, "eightmm_warmth", DEFAULT_EIGHTMM_WARMTH);
 	obs_data_set_default_double(settings, "eightmm_light_leak_alpha", DEFAULT_EIGHTMM_LIGHT_LEAK_ALPHA);
-	obs_data_set_default_double(settings, "eightmm_light_leak_radius_min", DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MIN);
-	obs_data_set_default_double(settings, "eightmm_light_leak_radius_max", DEFAULT_EIGHTMM_LIGHT_LEAK_RADIUS_MAX);
-	obs_data_set_default_int(settings, "eightmm_light_leak_min_interval_s", DEFAULT_EIGHTMM_LIGHT_LEAK_MIN_INTERVAL_S);
-	obs_data_set_default_int(settings, "eightmm_light_leak_max_interval_s", DEFAULT_EIGHTMM_LIGHT_LEAK_MAX_INTERVAL_S);
+	obs_data_set_default_string(settings, "eightmm_light_leak_position", DEFAULT_EIGHTMM_LIGHT_LEAK_POSITION);
+	obs_data_set_default_int(settings, "eightmm_light_leak_intensity", DEFAULT_EIGHTMM_LIGHT_LEAK_INTENSITY);
 	obs_data_set_default_double(settings, "eightmm_weave_px", DEFAULT_EIGHTMM_WEAVE_PX);
 	obs_data_set_default_double(settings, "eightmm_flicker", DEFAULT_EIGHTMM_FLICKER);
 	obs_data_set_default_int(settings, "eightmm_scratch_intensity", DEFAULT_EIGHTMM_SCRATCH_INTENSITY);
@@ -2877,6 +3040,20 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "bw_desaturation", DEFAULT_BW_DESATURATION);
 	obs_data_set_default_int(settings, "bw_contrast", DEFAULT_BW_CONTRAST);
 	obs_data_set_default_double(settings, "bw_vignette_strength", DEFAULT_BW_VIGNETTE_STRENGTH);
+
+	obs_data_set_default_int(settings, "glitch_intensity", DEFAULT_GLITCH_INTENSITY);
+	obs_data_set_default_int(settings, "glitch_pixel_sort_chance", DEFAULT_GLITCH_PIXEL_SORT_CHANCE);
+	obs_data_set_default_int(settings, "glitch_pixel_sort_max_rows", DEFAULT_GLITCH_PIXEL_SORT_MAX_ROWS);
+	obs_data_set_default_int(settings, "glitch_pixel_sort_threshold", DEFAULT_GLITCH_PIXEL_SORT_THRESHOLD);
+	obs_data_set_default_int(settings, "glitch_tear_chance", DEFAULT_GLITCH_TEAR_CHANCE);
+	obs_data_set_default_int(settings, "glitch_tear_max_count", DEFAULT_GLITCH_TEAR_MAX_COUNT);
+	obs_data_set_default_int(settings, "glitch_tear_max_height", DEFAULT_GLITCH_TEAR_MAX_HEIGHT);
+	obs_data_set_default_int(settings, "glitch_tear_max_offset", DEFAULT_GLITCH_TEAR_MAX_OFFSET);
+	obs_data_set_default_int(settings, "glitch_tear_duplicate_chance", DEFAULT_GLITCH_TEAR_DUPLICATE_CHANCE);
+	obs_data_set_default_int(settings, "glitch_channel_block_chance", DEFAULT_GLITCH_CHANNEL_BLOCK_CHANCE);
+	obs_data_set_default_int(settings, "glitch_channel_block_max_count", DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_COUNT);
+	obs_data_set_default_int(settings, "glitch_channel_block_max_size", DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_SIZE);
+	obs_data_set_default_int(settings, "glitch_channel_block_max_offset", DEFAULT_GLITCH_CHANNEL_BLOCK_MAX_OFFSET);
 
 	obs_data_set_default_int(settings, "bg_color", DEFAULT_COLOR_BLACK);
 	obs_data_set_default_int(settings, "bg_opacity", DEFAULT_BG_OPACITY);
@@ -2991,12 +3168,13 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 	bool isEightMm = style == "8mm";
 	bool isDuotone = style == "duotone";
 	bool isBw = style == "bw";
+	bool isGlitch = style == "glitch";
 
 	static const char *const kVhsKeys[] = {
 		"vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_chroma_max_offset", "vhs_chroma_vertical_jitter", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount",
 	};
 	static const char *const kEightMmKeys[] = {
-		"eightmm_intensity", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_light_leak_radius_min", "eightmm_light_leak_radius_max", "eightmm_light_leak_min_interval_s", "eightmm_light_leak_max_interval_s", "eightmm_weave_px", "eightmm_flicker", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count",
+		"eightmm_intensity", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_light_leak_position", "eightmm_light_leak_intensity", "eightmm_weave_px", "eightmm_flicker", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count",
 	};
 	static const char *const kDuotoneKeys[] = {
 		"duotone_shadow_color",
@@ -3008,6 +3186,9 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 		"bw_contrast",
 		"bw_vignette_strength",
 	};
+	static const char *const kGlitchKeys[] = {
+		"glitch_intensity", "glitch_pixel_sort_chance", "glitch_pixel_sort_max_rows", "glitch_pixel_sort_threshold", "glitch_tear_chance", "glitch_tear_max_count", "glitch_tear_max_height", "glitch_tear_max_offset", "glitch_tear_duplicate_chance", "glitch_channel_block_chance", "glitch_channel_block_max_count", "glitch_channel_block_max_size", "glitch_channel_block_max_offset",
+	};
 
 	for (const char *key : kVhsKeys)
 		obs_property_set_visible(obs_properties_get(props, key), isVhs);
@@ -3017,6 +3198,8 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 		obs_property_set_visible(obs_properties_get(props, key), isDuotone);
 	for (const char *key : kBwKeys)
 		obs_property_set_visible(obs_properties_get(props, key), isBw);
+	for (const char *key : kGlitchKeys)
+		obs_property_set_visible(obs_properties_get(props, key), isGlitch);
 
 	return true;
 }
@@ -3081,6 +3264,7 @@ static obs_properties_t *spotify_source_properties(void *data)
 	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleNone"), "none");
 	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleVhs"), "vhs");
 	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleEightMm"), "8mm");
+	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleGlitch"), "glitch");
 	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleDuotone"), "duotone");
 	obs_property_list_add_string(card_style_prop, obs_module_text("CardStyleBw"), "bw");
 
@@ -3102,16 +3286,19 @@ static obs_properties_t *spotify_source_properties(void *data)
 	obs_properties_add_float(props, "vhs_chroma_max_offset", obs_module_text("VhsChromaMaxOffset"), 0.0, 40.0, 0.5);
 	obs_properties_add_float(props, "vhs_chroma_vertical_jitter", obs_module_text("VhsChromaVerticalJitter"), 0.0, 0.5, 0.005);
 	obs_properties_add_int(props, "vhs_glitch_chance_pct", obs_module_text("VhsGlitchChance"), 0, 100, 1);
-	obs_properties_add_int(props, "vhs_glitch_max_bands", obs_module_text("VhsGlitchMaxBands"), 1, 10, 1);	
+	obs_properties_add_int(props, "vhs_glitch_max_bands", obs_module_text("VhsGlitchMaxBands"), 1, 10, 1);
 
 	obs_properties_add_int(props, "eightmm_intensity", obs_module_text("EightMmIntensity"), 0, 100, 1);
 	obs_properties_add_float(props, "eightmm_vignette_strength", obs_module_text("EightMmVignetteStrength"), 0.0, 1.0, 0.05);
 	obs_properties_add_float(props, "eightmm_warmth", obs_module_text("EightMmWarmth"), 0.0, 80.0, 1.0);
 	obs_properties_add_float(props, "eightmm_light_leak_alpha", obs_module_text("EightMmLightLeakAlpha"), 0.0, 1.0, 0.05);
-	obs_properties_add_float(props, "eightmm_light_leak_radius_min", obs_module_text("EightMmLightLeakRadiusMin"), 0.0, 2.0, 0.05);
-	obs_properties_add_float(props, "eightmm_light_leak_radius_max", obs_module_text("EightMmLightLeakRadiusMax"), 0.0, 2.0, 0.05);
-	obs_properties_add_int(props, "eightmm_light_leak_min_interval_s", obs_module_text("EightMmLightLeakMinInterval"), 1, 31536000, 1);
-	obs_properties_add_int(props, "eightmm_light_leak_max_interval_s", obs_module_text("EightMmLightLeakMaxInterval"), 1, 31536000, 1);
+	obs_property_t *eightmm_light_leak_position_prop = obs_properties_add_list(props, "eightmm_light_leak_position", obs_module_text("EightMmLightLeakPosition"), OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(eightmm_light_leak_position_prop, obs_module_text("EightMmLightLeakPositionNone"), "none");
+	obs_property_list_add_string(eightmm_light_leak_position_prop, obs_module_text("EightMmLightLeakPositionTopLeft"), "top_left");
+	obs_property_list_add_string(eightmm_light_leak_position_prop, obs_module_text("EightMmLightLeakPositionTopRight"), "top_right");
+	obs_property_list_add_string(eightmm_light_leak_position_prop, obs_module_text("EightMmLightLeakPositionBottomLeft"), "bottom_left");
+	obs_property_list_add_string(eightmm_light_leak_position_prop, obs_module_text("EightMmLightLeakPositionBottomRight"), "bottom_right");
+	obs_properties_add_int(props, "eightmm_light_leak_intensity", obs_module_text("EightMmLightLeakIntensity"), 1, 100, 1);
 	obs_properties_add_float(props, "eightmm_weave_px", obs_module_text("EightMmWeave"), 0.0, 15.0, 0.5);
 	obs_properties_add_float(props, "eightmm_flicker", obs_module_text("EightMmFlicker"), 0.0, 1.0, 0.05);
 	obs_properties_add_int(props, "eightmm_scratch_intensity", obs_module_text("EightMmScratchIntensity"), 0, 100, 1);
@@ -3126,6 +3313,21 @@ static obs_properties_t *spotify_source_properties(void *data)
 	obs_properties_add_int(props, "bw_desaturation", obs_module_text("BwDesaturation"), 0, 100, 1);
 	obs_properties_add_int(props, "bw_contrast", obs_module_text("BwContrast"), -100, 100, 1);
 	obs_properties_add_float(props, "bw_vignette_strength", obs_module_text("BwVignetteStrength"), 0.0, 1.0, 0.05);
+
+	obs_properties_add_int(props, "glitch_intensity", obs_module_text("GlitchIntensity"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_pixel_sort_chance", obs_module_text("GlitchPixelSortChance"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_pixel_sort_max_rows", obs_module_text("GlitchPixelSortMaxRows"), 1, 50, 1);
+	obs_properties_add_int(props, "glitch_pixel_sort_threshold", obs_module_text("GlitchPixelSortThreshold"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_tear_chance", obs_module_text("GlitchTearChance"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_tear_max_count", obs_module_text("GlitchTearMaxCount"), 0, 20, 1);
+	obs_properties_add_int(props, "glitch_tear_max_height", obs_module_text("GlitchTearMaxHeight"), 1, 200, 1);
+	obs_properties_add_int(props, "glitch_tear_max_offset", obs_module_text("GlitchTearMaxOffset"), 0, 400, 1);
+	obs_properties_add_int(props, "glitch_tear_duplicate_chance", obs_module_text("GlitchTearDuplicateChance"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_channel_block_chance", obs_module_text("GlitchChannelBlockChance"), 0, 100, 1);
+	obs_properties_add_int(props, "glitch_channel_block_max_count", obs_module_text("GlitchChannelBlockMaxCount"), 0, 20, 1);
+	obs_properties_add_int(props, "glitch_channel_block_max_size", obs_module_text("GlitchChannelBlockMaxSize"), 2, 400, 1);
+	obs_properties_add_int(props, "glitch_channel_block_max_offset", obs_module_text("GlitchChannelBlockMaxOffset"), 0, 200, 1);
+
 	obs_property_set_modified_callback(card_style_prop, card_style_modified);
 
 	obs_property_t *export_settings_prop = obs_properties_add_path(props, "export_settings_path", obs_module_text("ExportSettings"), OBS_PATH_FILE_SAVE, "JSON (*.json)", nullptr);
