@@ -454,7 +454,7 @@ static bool GetCurrentTrackSafe(GlobalSystemMediaTransportControlsSessionManager
 		if (outInfo) {
 			outInfo->HasTrack = false;
 		}
-		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: unknown exception");
+		blog(LOG_ERROR, "[spotify_now_playing] SMTC read failed: structured exception 0x%08lX", GetExceptionCode());
 		return false;
 	}
 }
@@ -463,6 +463,14 @@ void FreeImageBuffer(uint8_t *buffer)
 {
 	delete[] buffer;
 }
+
+// Ensures obs_leave_graphics() is always paired with obs_enter_graphics()
+struct ScopedGraphics {
+	ScopedGraphics() { obs_enter_graphics(); }
+	~ScopedGraphics() { obs_leave_graphics(); }
+	ScopedGraphics(const ScopedGraphics &) = delete;
+	ScopedGraphics &operator=(const ScopedGraphics &) = delete;
+};
 
 void AddRoundedRect(GraphicsPath &path, const Rect &r, int radius)
 {
@@ -1760,7 +1768,7 @@ static void DrawGlitchOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Gr
 	g.SetClip(&savedClip);
 }
 
-static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
+static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed)
 {
 	const int cardW = std::max(s.card_w, 50);
 	const int cardH = std::max(s.card_h, 30);
@@ -2025,6 +2033,23 @@ static void compose_bitmap(spotify_source *ctx, const std::string &title, const 
 	ctx->new_bitmap_ready = true;
 }
 
+static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
+{
+	__try
+	{
+		compose_bitmap_impl(ctx, title, artist, s, settings_changed);		
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW)
+		{
+			_resetstkoflw();			
+		}
+		blog(LOG_ERROR, "[spotify_now_playing] compose_bitmap failed: structured exception 0x%08lX", GetExceptionCode());		
+	}	
+}
+
+
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
 	std::lock_guard<std::mutex> lock(ctx->settings_mutex);
@@ -2080,6 +2105,8 @@ static void poll_loop(spotify_source *ctx)
 		com_initialized = true;
 	} catch (const winrt::hresult_error &) {
 		com_initialized = false;
+	} catch (...) {
+		com_initialized = false;
 	}
 
 	//manager must be created inside poll_loop so OBS exits cleanly. Its a com apartment context thing.
@@ -2091,423 +2118,436 @@ static void poll_loop(spotify_source *ctx)
 	std::chrono::steady_clock::time_point gap_start{};
 
 	while (ctx->running) {
-		if (!ctx->is_active) {
-			if (ctx->settings_dirty) {
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
-				ctx->settings_dirty = false;
-			}
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
-			continue;
-		}
-
-		if (!sessionManager && com_initialized) {
-			try {
-				sessionManager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
-			} catch (const winrt::hresult_error &) {
-				sessionManager = nullptr;
-			}
-		}
-
-		NativeMediaInfo info{};
-		bool has = GetCurrentTrackSafe(sessionManager, &info, ctx->kPossibleMusicSystems, ctx->kPossibleBrowserMediaSources, ctx->browser_media_source_enabled);
-
-		std::string title = has ? std::string(info.SongName) : std::string();
-		std::string artist = has ? std::string(info.ArtistName) : std::string();
-
-		bool show_album_name;
-		{
-			std::lock_guard<std::mutex> lock(ctx->settings_mutex);
-			show_album_name = ctx->show_album_name;
-		}
-		if (show_album_name) {
-			std::string albumName = " - " + std::string(info.AlbumName);
-			artist.append(albumName);
-		}
-
-		bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) || (artist != ctx->last_artist);
-
-		if (has) {
-			gap_active = false;
-			ctx->is_playing = info.IsPlaying;
-			auto now = std::chrono::steady_clock::now();
-
-			if (ctx->is_playing) {
-				ctx->last_playing_time = now;
-			}
-
-			bool positionChanged = (info.CurrentPlaybackTimeTicks != ctx->playback_position_ticks) || (info.SongDurationTicks != ctx->song_duration_ticks);
-			if (track_changed || positionChanged) {
-				ctx->song_duration_ticks = info.SongDurationTicks;
-				ctx->playback_position_ticks = info.CurrentPlaybackTimeTicks;
-				ctx->position_sample_time = now;
-			}
-
-			if (track_changed) {
-				UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
-
-				ctx->last_song = title;
-				ctx->last_artist = artist;
-				ctx->have_track = true;
-				ctx->max_displayed_position_ticks = 0;
-				ctx->autohide_reference_time = now;
-
-				ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
-				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused_at_end = false;
-				ctx->artist_scroll_paused_at_end = false;
-				ctx->title_scroll_paused_at_start = true;
-				ctx->artist_scroll_paused_at_start = true;
-				ctx->title_pause_start = now;
-				ctx->artist_pause_start = now;
-				ctx->last_scroll_tick = std::chrono::steady_clock::now();
-
-				AppearanceSettings snap = snapshot_settings(ctx);
-
-				std::vector<uint8_t> fromPixels;
-				uint32_t fromW = 0, fromH = 0;
-				{
-					std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
-					fromPixels = ctx->pending_pixels;
-					fromW = ctx->pending_w;
-					fromH = ctx->pending_h;
+		try {
+			if (!ctx->is_active) {
+				if (ctx->settings_dirty) {
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
+					ctx->settings_dirty = false;
 				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+				continue;
+			}
 
-				compose_bitmap(ctx, title, artist, snap);
-
-				if (snap.track_change_animation_enabled && !fromPixels.empty()) {
-					std::vector<uint8_t> toPixels;
-					uint32_t toW = 0, toH = 0;
-					{
-						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
-						toPixels = ctx->pending_pixels;
-						toW = ctx->pending_w;
-						toH = ctx->pending_h;
-					}
-
-					if (fromW == toW && fromH == toH) {
-						ctx->transition_from_pixels = std::move(fromPixels);
-						ctx->transition_to_pixels = std::move(toPixels);
-						ctx->transition_w = toW;
-						ctx->transition_h = toH;
-						ctx->transition_start = now;
-						ctx->transition_active = true;
-
-						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
-						ctx->pending_pixels = ctx->transition_from_pixels;
-						ctx->pending_w = fromW;
-						ctx->pending_h = fromH;
-						ctx->new_bitmap_ready = true;
-					}
+			if (!sessionManager && com_initialized) {
+				try {
+					sessionManager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+				} catch (const winrt::hresult_error &) {
+					sessionManager = nullptr;
+				} catch (...) {
+					sessionManager = nullptr;
 				}
-			} else if (ArtBytesDiffer(ctx->last_art_bytes, info.ImageData, info.ImageLength)) {
-				UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
-			} else if (ctx->settings_dirty) {
-				ctx->title_scroll_px = 0.0;
-				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused_at_end = false;
-				ctx->artist_scroll_paused_at_end = false;
-				ctx->title_scroll_paused_at_start = true;
-				ctx->artist_scroll_paused_at_start = true;
-				ctx->title_pause_start = now;
-				ctx->artist_pause_start = now;
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
-			}
-		} else if (ctx->have_track) {
-			ctx->is_playing = false;
-
-			if (!gap_active) {
-				gap_active = true;
-				gap_start = std::chrono::steady_clock::now();
 			}
 
-			if (std::chrono::steady_clock::now() - gap_start >= MISSING_SESSION_GRACE) {
-				ctx->last_song.clear();
-				ctx->last_artist.clear();
-				UpdateCachedArt(ctx, nullptr, 0);
-				ctx->song_duration_ticks = 0;
-				ctx->playback_position_ticks = 0;
-				ctx->max_displayed_position_ticks = 0;
-				ctx->have_track = false;
-				ctx->autohide_reference_time = std::chrono::steady_clock::now();
+			NativeMediaInfo info{};
+			bool has = GetCurrentTrackSafe(sessionManager, &info, ctx->kPossibleMusicSystems, ctx->kPossibleBrowserMediaSources, ctx->browser_media_source_enabled);
+
+			std::string title = has ? std::string(info.SongName) : std::string();
+			std::string artist = has ? std::string(info.ArtistName) : std::string();
+
+			bool show_album_name;
+			{
+				std::lock_guard<std::mutex> lock(ctx->settings_mutex);
+				show_album_name = ctx->show_album_name;
+			}
+			if (show_album_name) {
+				std::string albumName = " - " + std::string(info.AlbumName);
+				artist.append(albumName);
+			}
+
+			bool track_changed = (has != ctx->have_track) || (title != ctx->last_song) || (artist != ctx->last_artist);
+
+			if (has) {
 				gap_active = false;
-				ctx->title_scroll_px = 0.0;
-				ctx->artist_scroll_px = 0.0;
-				ctx->title_scroll_paused_at_end = false;
-				ctx->artist_scroll_paused_at_end = false;
-				ctx->title_scroll_paused_at_start = true;
-				ctx->artist_scroll_paused_at_start = true;
-				ctx->title_pause_start = std::chrono::steady_clock::now();
-				ctx->artist_pause_start = std::chrono::steady_clock::now();
-				compose_bitmap(ctx, "", "", snapshot_settings(ctx));
-			}
-		} else if (ctx->settings_dirty) {
-			compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
-		}
-		ctx->settings_dirty = false;
-
-		if (has && info.ImageData != nullptr)
-			FreeImageBuffer(info.ImageData);
-
-		AppearanceSettings s = snapshot_settings(ctx);
-
-		for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
-			if (ctx->settings_dirty)
-				break; // let the outer loop apply the appearance change immediately
-
-			if (ctx->have_track || s.show_plugin_attribution || s.autohide_when_not_playing) {
+				ctx->is_playing = info.IsPlaying;
 				auto now = std::chrono::steady_clock::now();
 
-				bool autohideChanged = UpdateAutohideAlpha(ctx, s, now);
+				if (ctx->is_playing) {
+					ctx->last_playing_time = now;
+				}
 
-				if (ctx->transition_active) {
-					double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->transition_start).count();
-					double t = elapsedMs / (double)TRACK_CHANGE_TRANSITION_MS;
+				bool positionChanged = (info.CurrentPlaybackTimeTicks != ctx->playback_position_ticks) || (info.SongDurationTicks != ctx->song_duration_ticks);
+				if (track_changed || positionChanged) {
+					ctx->song_duration_ticks = info.SongDurationTicks;
+					ctx->playback_position_ticks = info.CurrentPlaybackTimeTicks;
+					ctx->position_sample_time = now;
+				}
 
-					std::vector<uint8_t> blended;
-					BlendPixelBuffers(ctx->transition_from_pixels, ctx->transition_to_pixels, blended, t);
-					ScaleAlphaChannel(blended, ctx->autohide_alpha);
+				if (track_changed) {
+					UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
 
+					ctx->last_song = title;
+					ctx->last_artist = artist;
+					ctx->have_track = true;
+					ctx->max_displayed_position_ticks = 0;
+					ctx->autohide_reference_time = now;
+
+					ctx->title_scroll_px = 0.0; // New track -- restart the marquee from the beginning.
+					ctx->artist_scroll_px = 0.0;
+					ctx->title_scroll_paused_at_end = false;
+					ctx->artist_scroll_paused_at_end = false;
+					ctx->title_scroll_paused_at_start = true;
+					ctx->artist_scroll_paused_at_start = true;
+					ctx->title_pause_start = now;
+					ctx->artist_pause_start = now;
+					ctx->last_scroll_tick = std::chrono::steady_clock::now();
+
+					AppearanceSettings snap = snapshot_settings(ctx);
+
+					std::vector<uint8_t> fromPixels;
+					uint32_t fromW = 0, fromH = 0;
 					{
 						std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
-						ctx->pending_pixels = std::move(blended);
-						ctx->pending_w = ctx->transition_w;
-						ctx->pending_h = ctx->transition_h;
+						fromPixels = ctx->pending_pixels;
+						fromW = ctx->pending_w;
+						fromH = ctx->pending_h;
 					}
-					ctx->new_bitmap_ready = true;
 
-					if (t >= 1.0) {
-						ctx->transition_active = false;
-						ctx->transition_from_pixels.clear();
-						ctx->transition_to_pixels.clear();
+					compose_bitmap(ctx, title, artist, snap);
+
+					if (snap.track_change_animation_enabled && !fromPixels.empty()) {
+						std::vector<uint8_t> toPixels;
+						uint32_t toW = 0, toH = 0;
+						{
+							std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+							toPixels = ctx->pending_pixels;
+							toW = ctx->pending_w;
+							toH = ctx->pending_h;
+						}
+
+						if (fromW == toW && fromH == toH) {
+							ctx->transition_from_pixels = std::move(fromPixels);
+							ctx->transition_to_pixels = std::move(toPixels);
+							ctx->transition_w = toW;
+							ctx->transition_h = toH;
+							ctx->transition_start = now;
+							ctx->transition_active = true;
+
+							std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+							ctx->pending_pixels = ctx->transition_from_pixels;
+							ctx->pending_w = fromW;
+							ctx->pending_h = fromH;
+							ctx->new_bitmap_ready = true;
+						}
 					}
-				} else {
-					bool needCompose = autohideChanged;
+				} else if (ArtBytesDiffer(ctx->last_art_bytes, info.ImageData, info.ImageLength)) {
+					UpdateCachedArt(ctx, info.ImageData, info.ImageLength);
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
+				} else if (ctx->settings_dirty) {
+					ctx->title_scroll_px = 0.0;
+					ctx->artist_scroll_px = 0.0;
+					ctx->title_scroll_paused_at_end = false;
+					ctx->artist_scroll_paused_at_end = false;
+					ctx->title_scroll_paused_at_start = true;
+					ctx->artist_scroll_paused_at_start = true;
+					ctx->title_pause_start = now;
+					ctx->artist_pause_start = now;
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
+				}
+			} else if (ctx->have_track) {
+				ctx->is_playing = false;
 
-					if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
-						if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
-							ctx->last_scroll_tick = now;
+				if (!gap_active) {
+					gap_active = true;
+					gap_start = std::chrono::steady_clock::now();
+				}
 
-							if (ctx->title_needs_scroll) {
-								if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
-									if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
-										if (ctx->title_scroll_paused_at_end) {
-											ctx->title_scroll_px = 0.0;
-											ctx->title_scroll_paused_at_end = false;
-											ctx->title_scroll_paused_at_start = true;
+				if (std::chrono::steady_clock::now() - gap_start >= MISSING_SESSION_GRACE) {
+					ctx->last_song.clear();
+					ctx->last_artist.clear();
+					UpdateCachedArt(ctx, nullptr, 0);
+					ctx->song_duration_ticks = 0;
+					ctx->playback_position_ticks = 0;
+					ctx->max_displayed_position_ticks = 0;
+					ctx->have_track = false;
+					ctx->autohide_reference_time = std::chrono::steady_clock::now();
+					gap_active = false;
+					ctx->title_scroll_px = 0.0;
+					ctx->artist_scroll_px = 0.0;
+					ctx->title_scroll_paused_at_end = false;
+					ctx->artist_scroll_paused_at_end = false;
+					ctx->title_scroll_paused_at_start = true;
+					ctx->artist_scroll_paused_at_start = true;
+					ctx->title_pause_start = std::chrono::steady_clock::now();
+					ctx->artist_pause_start = std::chrono::steady_clock::now();
+					compose_bitmap(ctx, "", "", snapshot_settings(ctx));
+				}
+			} else if (ctx->settings_dirty) {
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
+			}
+			ctx->settings_dirty = false;
+
+			if (has && info.ImageData != nullptr)
+				FreeImageBuffer(info.ImageData);
+
+			AppearanceSettings s = snapshot_settings(ctx);
+
+			for (int waited = 0; waited < POLL_INTERVAL_MS && ctx->running; waited += 50) {
+				if (ctx->settings_dirty)
+					break; // let the outer loop apply the appearance change immediately
+
+				if (ctx->have_track || s.show_plugin_attribution || s.autohide_when_not_playing) {
+					auto now = std::chrono::steady_clock::now();
+
+					bool autohideChanged = UpdateAutohideAlpha(ctx, s, now);
+
+					if (ctx->transition_active) {
+						double elapsedMs = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(now - ctx->transition_start).count();
+						double t = elapsedMs / (double)TRACK_CHANGE_TRANSITION_MS;
+
+						std::vector<uint8_t> blended;
+						BlendPixelBuffers(ctx->transition_from_pixels, ctx->transition_to_pixels, blended, t);
+						ScaleAlphaChannel(blended, ctx->autohide_alpha);
+
+						{
+							std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+							ctx->pending_pixels = std::move(blended);
+							ctx->pending_w = ctx->transition_w;
+							ctx->pending_h = ctx->transition_h;
+						}
+						ctx->new_bitmap_ready = true;
+
+						if (t >= 1.0) {
+							ctx->transition_active = false;
+							ctx->transition_from_pixels.clear();
+							ctx->transition_to_pixels.clear();
+						}
+					} else {
+						bool needCompose = autohideChanged;
+
+						if (ctx->title_needs_scroll || ctx->artist_needs_scroll) {
+							if (now - ctx->last_scroll_tick >= std::chrono::milliseconds(s.scroll_speed_ms)) {
+								ctx->last_scroll_tick = now;
+
+								if (ctx->title_needs_scroll) {
+									if (ctx->title_scroll_paused_at_end || ctx->title_scroll_paused_at_start) {
+										if (now - ctx->title_pause_start >= SCROLL_END_PAUSE) {
+											if (ctx->title_scroll_paused_at_end) {
+												ctx->title_scroll_px = 0.0;
+												ctx->title_scroll_paused_at_end = false;
+												ctx->title_scroll_paused_at_start = true;
+												ctx->title_pause_start = now;
+												needCompose = true;
+											} else {
+												ctx->title_scroll_paused_at_start = false;
+												needCompose = true;
+											}
+										}
+									} else {
+										ctx->title_scroll_px += ctx->title_avg_char_px;
+										if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
+											ctx->title_scroll_px = ctx->title_scroll_max_px;
+											ctx->title_scroll_paused_at_end = true;
 											ctx->title_pause_start = now;
-											needCompose = true;
-										} else {
-											ctx->title_scroll_paused_at_start = false;
-											needCompose = true;
 										}
+										needCompose = true;
 									}
-								} else {
-									ctx->title_scroll_px += ctx->title_avg_char_px;
-									if (ctx->title_scroll_px >= ctx->title_scroll_max_px) {
-										ctx->title_scroll_px = ctx->title_scroll_max_px;
-										ctx->title_scroll_paused_at_end = true;
-										ctx->title_pause_start = now;
-									}
-									needCompose = true;
 								}
-							}
 
-							if (ctx->artist_needs_scroll) {
-								if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
-									if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
-										if (ctx->artist_scroll_paused_at_end) {
-											ctx->artist_scroll_px = 0.0;
-											ctx->artist_scroll_paused_at_end = false;
-											ctx->artist_scroll_paused_at_start = true;
+								if (ctx->artist_needs_scroll) {
+									if (ctx->artist_scroll_paused_at_end || ctx->artist_scroll_paused_at_start) {
+										if (now - ctx->artist_pause_start >= SCROLL_END_PAUSE) {
+											if (ctx->artist_scroll_paused_at_end) {
+												ctx->artist_scroll_px = 0.0;
+												ctx->artist_scroll_paused_at_end = false;
+												ctx->artist_scroll_paused_at_start = true;
+												ctx->artist_pause_start = now;
+												needCompose = true;
+											} else {
+												ctx->artist_scroll_paused_at_start = false;
+												needCompose = true;
+											}
+										}
+									} else {
+										ctx->artist_scroll_px += ctx->artist_avg_char_px;
+										if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) {
+											ctx->artist_scroll_px = ctx->artist_scroll_max_px;
+											ctx->artist_scroll_paused_at_end = true;
 											ctx->artist_pause_start = now;
-											needCompose = true;
-										} else {
-											ctx->artist_scroll_paused_at_start = false;
-											needCompose = true;
 										}
+										needCompose = true;
 									}
-								} else {
-									ctx->artist_scroll_px += ctx->artist_avg_char_px;
-									if (ctx->artist_scroll_px >= ctx->artist_scroll_max_px) {
-										ctx->artist_scroll_px = ctx->artist_scroll_max_px;
-										ctx->artist_scroll_paused_at_end = true;
-										ctx->artist_pause_start = now;
-									}
-									needCompose = true;
 								}
 							}
 						}
-					}
 
-					if (s.vu_meter_enabled && now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
-						ctx->last_vu_tick = now;
-						int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
-						if (ctx->is_playing) {
-							std::uniform_real_distribution<double> dist(0.0, 1.0);
+						if (s.vu_meter_enabled && now - ctx->last_vu_tick >= std::chrono::milliseconds(s.vu_update_ms)) {
+							ctx->last_vu_tick = now;
+							int barCount = std::clamp(s.vu_bar_count, 1, VU_MAX_BAR_COUNT);
+							if (ctx->is_playing) {
+								std::uniform_real_distribution<double> dist(0.0, 1.0);
 
-							double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
-							for (int i = 0; i < barCount; i++) {
-								double target = dist(ctx->vu_rng);
-								ctx->vu_bar_frac[i] += (target - ctx->vu_bar_frac[i]) * pull;
+								double pull = std::clamp(s.vu_randomness, 0, 100) / 100.0;
+								for (int i = 0; i < barCount; i++) {
+									double target = dist(ctx->vu_rng);
+									ctx->vu_bar_frac[i] += (target - ctx->vu_bar_frac[i]) * pull;
+								}
+								ctx->vu_was_playing = true;
+								needCompose = true;
+							} else if (ctx->vu_was_playing) {
+								for (int i = 0; i < barCount; i++)
+									ctx->vu_bar_frac[i] = 0.0;
+								ctx->vu_was_playing = false;
+								needCompose = true;
 							}
-							ctx->vu_was_playing = true;
-							needCompose = true;
-						} else if (ctx->vu_was_playing) {
-							for (int i = 0; i < barCount; i++)
-								ctx->vu_bar_frac[i] = 0.0;
-							ctx->vu_was_playing = false;
-							needCompose = true;
-						}
-					}
-
-					if (s.show_progress_bar && ctx->have_track && now - ctx->last_progress_tick >= std::chrono::milliseconds(PROGRESS_UPDATE_MS)) {
-						ctx->last_progress_tick = now;
-						needCompose = true;
-					}
-
-					if (s.card_style == "vhs" && now - ctx->last_vhs_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
-						ctx->last_vhs_tick = now;
-
-						std::uniform_int_distribution<int> noiseOffDist(0, VHS_NOISE_TEXTURE_SIZE - 1);
-						ctx->vhs_noise_offset_x = noiseOffDist(ctx->vhs_rng);
-						ctx->vhs_noise_offset_y = noiseOffDist(ctx->vhs_rng);
-
-						int scanlineSpacing = std::max(1, s.vhs_scanline_spacing);
-						ctx->vhs_scanline_offset = (ctx->vhs_scanline_offset + 1) % scanlineSpacing;
-
-						std::uniform_real_distribution<double> glitchChance(0.0, 1.0);
-						ctx->vhs_glitch_active = glitchChance(ctx->vhs_rng) < (s.vhs_glitch_chance_pct / 100.0);
-						if (ctx->vhs_glitch_active) {
-							std::uniform_int_distribution<int> yDist(0, std::max(1, s.card_h - 1));
-							ctx->vhs_glitch_y = yDist(ctx->vhs_rng);
 						}
 
-						std::uniform_real_distribution<double> jitterDist(-1.0, 1.0);
-						ctx->vhs_ca_r_dx = (float)jitterDist(ctx->vhs_rng);
-						ctx->vhs_ca_r_dy = (float)jitterDist(ctx->vhs_rng);
-						ctx->vhs_ca_b_dx = (float)jitterDist(ctx->vhs_rng);
-						ctx->vhs_ca_b_dy = (float)jitterDist(ctx->vhs_rng);
-						std::uniform_int_distribution<int> coinFlip(0, 1);
-						ctx->vhs_ca_red_active = coinFlip(ctx->vhs_rng) == 0;
+						if (s.show_progress_bar && ctx->have_track && now - ctx->last_progress_tick >= std::chrono::milliseconds(PROGRESS_UPDATE_MS)) {
+							ctx->last_progress_tick = now;
+							needCompose = true;
+						}
 
-						int trackingMinMs = std::max(1, s.vhs_tracking_min_interval_s) * 1000;
-						int trackingMaxMs = std::max(trackingMinMs, s.vhs_tracking_max_interval_s * 1000);
-						std::uniform_int_distribution<int> intervalDist(trackingMinMs, trackingMaxMs);
-						if (!ctx->vhs_tracking_active) {
-							if (ctx->vhs_tracking_next_start == std::chrono::steady_clock::time_point{}) {
-								ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
-							} else if (now >= ctx->vhs_tracking_next_start) {
-								ctx->vhs_tracking_active = true;
-								ctx->vhs_tracking_line_y = 0;
-								int lineMin = std::clamp(s.vhs_tracking_line_min_count, 1, VHS_TRACKING_LINE_ARRAY_CAP);
-								int lineMax = std::clamp(s.vhs_tracking_line_max_count, lineMin, VHS_TRACKING_LINE_ARRAY_CAP);
-								std::uniform_int_distribution<int> countDist(lineMin, lineMax);
-								ctx->vhs_tracking_line_count = countDist(ctx->vhs_rng);
+						if (s.card_style == "vhs" && now - ctx->last_vhs_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
+							ctx->last_vhs_tick = now;
+
+							std::uniform_int_distribution<int> noiseOffDist(0, VHS_NOISE_TEXTURE_SIZE - 1);
+							ctx->vhs_noise_offset_x = noiseOffDist(ctx->vhs_rng);
+							ctx->vhs_noise_offset_y = noiseOffDist(ctx->vhs_rng);
+
+							int scanlineSpacing = std::max(1, s.vhs_scanline_spacing);
+							ctx->vhs_scanline_offset = (ctx->vhs_scanline_offset + 1) % scanlineSpacing;
+
+							std::uniform_real_distribution<double> glitchChance(0.0, 1.0);
+							ctx->vhs_glitch_active = glitchChance(ctx->vhs_rng) < (s.vhs_glitch_chance_pct / 100.0);
+							if (ctx->vhs_glitch_active) {
+								std::uniform_int_distribution<int> yDist(0, std::max(1, s.card_h - 1));
+								ctx->vhs_glitch_y = yDist(ctx->vhs_rng);
+							}
+
+							std::uniform_real_distribution<double> jitterDist(-1.0, 1.0);
+							ctx->vhs_ca_r_dx = (float)jitterDist(ctx->vhs_rng);
+							ctx->vhs_ca_r_dy = (float)jitterDist(ctx->vhs_rng);
+							ctx->vhs_ca_b_dx = (float)jitterDist(ctx->vhs_rng);
+							ctx->vhs_ca_b_dy = (float)jitterDist(ctx->vhs_rng);
+							std::uniform_int_distribution<int> coinFlip(0, 1);
+							ctx->vhs_ca_red_active = coinFlip(ctx->vhs_rng) == 0;
+
+							int trackingMinMs = std::max(1, s.vhs_tracking_min_interval_s) * 1000;
+							int trackingMaxMs = std::max(trackingMinMs, s.vhs_tracking_max_interval_s * 1000);
+							std::uniform_int_distribution<int> intervalDist(trackingMinMs, trackingMaxMs);
+							if (!ctx->vhs_tracking_active) {
+								if (ctx->vhs_tracking_next_start == std::chrono::steady_clock::time_point{}) {
+									ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
+								} else if (now >= ctx->vhs_tracking_next_start) {
+									ctx->vhs_tracking_active = true;
+									ctx->vhs_tracking_line_y = 0;
+									int lineMin = std::clamp(s.vhs_tracking_line_min_count, 1, VHS_TRACKING_LINE_ARRAY_CAP);
+									int lineMax = std::clamp(s.vhs_tracking_line_max_count, lineMin, VHS_TRACKING_LINE_ARRAY_CAP);
+									std::uniform_int_distribution<int> countDist(lineMin, lineMax);
+									ctx->vhs_tracking_line_count = countDist(ctx->vhs_rng);
+									for (int i = 0; i < VHS_TRACKING_LINE_ARRAY_CAP; i++)
+										ctx->vhs_tracking_shift_dir[i] = (float)jitterDist(ctx->vhs_rng);
+								}
+							} else {
 								for (int i = 0; i < VHS_TRACKING_LINE_ARRAY_CAP; i++)
 									ctx->vhs_tracking_shift_dir[i] = (float)jitterDist(ctx->vhs_rng);
-							}
-						} else {
-							for (int i = 0; i < VHS_TRACKING_LINE_ARRAY_CAP; i++)
-								ctx->vhs_tracking_shift_dir[i] = (float)jitterDist(ctx->vhs_rng);
 
-							ctx->vhs_tracking_line_y += std::max(1, s.card_h / 24);
-							if (ctx->vhs_tracking_line_y >= s.card_h + ctx->vhs_tracking_line_count * std::max(0, s.vhs_tracking_line_gap)) {
-								ctx->vhs_tracking_active = false;
-								ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
+								ctx->vhs_tracking_line_y += std::max(1, s.card_h / 24);
+								if (ctx->vhs_tracking_line_y >= s.card_h + ctx->vhs_tracking_line_count * std::max(0, s.vhs_tracking_line_gap)) {
+									ctx->vhs_tracking_active = false;
+									ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
+								}
 							}
+
+							needCompose = true;
 						}
 
-						needCompose = true;
-					}
+						if (s.card_style == "8mm" && now - ctx->last_eightmm_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
+							ctx->last_eightmm_tick = now;
 
-					if (s.card_style == "8mm" && now - ctx->last_eightmm_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
-						ctx->last_eightmm_tick = now;
+							std::uniform_int_distribution<int> noiseOffDist(0, VHS_NOISE_TEXTURE_SIZE - 1);
+							ctx->eightmm_noise_offset_x = noiseOffDist(ctx->eightmm_rng);
+							ctx->eightmm_noise_offset_y = noiseOffDist(ctx->eightmm_rng);
 
-						std::uniform_int_distribution<int> noiseOffDist(0, VHS_NOISE_TEXTURE_SIZE - 1);
-						ctx->eightmm_noise_offset_x = noiseOffDist(ctx->eightmm_rng);
-						ctx->eightmm_noise_offset_y = noiseOffDist(ctx->eightmm_rng);
+							std::uniform_real_distribution<double> weaveDist(-1.0, 1.0);
+							ctx->eightmm_weave_offset = (float)(weaveDist(ctx->eightmm_rng) * s.eightmm_weave_px);
 
-						std::uniform_real_distribution<double> weaveDist(-1.0, 1.0);
-						ctx->eightmm_weave_offset = (float)(weaveDist(ctx->eightmm_rng) * s.eightmm_weave_px);
+							std::uniform_real_distribution<double> flickerDist(-1.0, 1.0);
+							ctx->eightmm_flicker_offset = (float)flickerDist(ctx->eightmm_rng);
 
-						std::uniform_real_distribution<double> flickerDist(-1.0, 1.0);
-						ctx->eightmm_flicker_offset = (float)flickerDist(ctx->eightmm_rng);
-
-						needCompose = true;
-					}
-
-					if (s.card_style == "glitch" && now - ctx->last_glitch_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
-						ctx->last_glitch_tick = now;
-
-						std::uniform_real_distribution<double> chanceDist(0.0, 1.0);
-
-						ctx->glitch_sort_rows.clear();
-						if (chanceDist(ctx->glitch_rng) < (s.glitch_pixel_sort_chance / 100.0)) {
-							std::uniform_int_distribution<int> rowCountDist(1, std::max(1, s.glitch_pixel_sort_max_rows));
-							int rowCount = rowCountDist(ctx->glitch_rng);
-							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
-							std::uniform_real_distribution<double> centerDist(0.0, 255.0);
-							for (int i = 0; i < rowCount; i++) {
-								GlitchSortRow row;
-								row.y = yDist(ctx->glitch_rng);
-								row.center = (float)centerDist(ctx->glitch_rng);
-								ctx->glitch_sort_rows.push_back(row);
-							}
+							needCompose = true;
 						}
 
-						ctx->glitch_tears.clear();
-						if (chanceDist(ctx->glitch_rng) < (s.glitch_tear_chance / 100.0)) {
-							std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_tear_max_count));
-							int tearCount = countDist(ctx->glitch_rng);
-							std::uniform_int_distribution<int> hDist(1, std::max(1, s.glitch_tear_max_height));
-							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
-							int maxOffset = std::max(0, s.glitch_tear_max_offset);
-							std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
-							for (int i = 0; i < tearCount; i++) {
-								GlitchTear tear;
-								tear.h = hDist(ctx->glitch_rng);
-								tear.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h));
-								tear.offsetX = offsetDist(ctx->glitch_rng);
-								bool duplicate = chanceDist(ctx->glitch_rng) < (s.glitch_tear_duplicate_chance / 100.0);
-								tear.srcY = duplicate ? std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h)) : tear.y;
-								ctx->glitch_tears.push_back(tear);
+						if (s.card_style == "glitch" && now - ctx->last_glitch_tick >= std::chrono::milliseconds(DEFAULT_ANIMATION_UPDATE_MS)) {
+							ctx->last_glitch_tick = now;
+
+							std::uniform_real_distribution<double> chanceDist(0.0, 1.0);
+
+							ctx->glitch_sort_rows.clear();
+							if (chanceDist(ctx->glitch_rng) < (s.glitch_pixel_sort_chance / 100.0)) {
+								std::uniform_int_distribution<int> rowCountDist(1, std::max(1, s.glitch_pixel_sort_max_rows));
+								int rowCount = rowCountDist(ctx->glitch_rng);
+								std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+								std::uniform_real_distribution<double> centerDist(0.0, 255.0);
+								for (int i = 0; i < rowCount; i++) {
+									GlitchSortRow row;
+									row.y = yDist(ctx->glitch_rng);
+									row.center = (float)centerDist(ctx->glitch_rng);
+									ctx->glitch_sort_rows.push_back(row);
+								}
 							}
+
+							ctx->glitch_tears.clear();
+							if (chanceDist(ctx->glitch_rng) < (s.glitch_tear_chance / 100.0)) {
+								std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_tear_max_count));
+								int tearCount = countDist(ctx->glitch_rng);
+								std::uniform_int_distribution<int> hDist(1, std::max(1, s.glitch_tear_max_height));
+								std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+								int maxOffset = std::max(0, s.glitch_tear_max_offset);
+								std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
+								for (int i = 0; i < tearCount; i++) {
+									GlitchTear tear;
+									tear.h = hDist(ctx->glitch_rng);
+									tear.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h));
+									tear.offsetX = offsetDist(ctx->glitch_rng);
+									bool duplicate = chanceDist(ctx->glitch_rng) < (s.glitch_tear_duplicate_chance / 100.0);
+									tear.srcY = duplicate ? std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - tear.h)) : tear.y;
+									ctx->glitch_tears.push_back(tear);
+								}
+							}
+
+							ctx->glitch_channel_blocks.clear();
+							if (chanceDist(ctx->glitch_rng) < (s.glitch_channel_block_chance / 100.0)) {
+								std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_channel_block_max_count));
+								int blockCount = countDist(ctx->glitch_rng);
+								std::uniform_int_distribution<int> sizeDist(2, std::max(2, s.glitch_channel_block_max_size));
+								std::uniform_int_distribution<int> xDist(0, std::max(0, s.card_w - 1));
+								std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
+								std::uniform_int_distribution<int> channelDist(0, 2);
+								int maxOffset = std::max(0, s.glitch_channel_block_max_offset);
+								std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
+								for (int i = 0; i < blockCount; i++) {
+									GlitchChannelBlock block;
+									block.w = sizeDist(ctx->glitch_rng);
+									block.h = sizeDist(ctx->glitch_rng);
+									block.x = std::clamp(xDist(ctx->glitch_rng), 0, std::max(0, s.card_w - block.w));
+									block.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - block.h));
+									block.channel = channelDist(ctx->glitch_rng);
+									block.offsetX = offsetDist(ctx->glitch_rng);
+									block.offsetY = offsetDist(ctx->glitch_rng);
+									ctx->glitch_channel_blocks.push_back(block);
+								}
+							}
+
+							needCompose = true;
 						}
 
-						ctx->glitch_channel_blocks.clear();
-						if (chanceDist(ctx->glitch_rng) < (s.glitch_channel_block_chance / 100.0)) {
-							std::uniform_int_distribution<int> countDist(1, std::max(1, s.glitch_channel_block_max_count));
-							int blockCount = countDist(ctx->glitch_rng);
-							std::uniform_int_distribution<int> sizeDist(2, std::max(2, s.glitch_channel_block_max_size));
-							std::uniform_int_distribution<int> xDist(0, std::max(0, s.card_w - 1));
-							std::uniform_int_distribution<int> yDist(0, std::max(0, s.card_h - 1));
-							std::uniform_int_distribution<int> channelDist(0, 2);
-							int maxOffset = std::max(0, s.glitch_channel_block_max_offset);
-							std::uniform_int_distribution<int> offsetDist(-maxOffset, maxOffset);
-							for (int i = 0; i < blockCount; i++) {
-								GlitchChannelBlock block;
-								block.w = sizeDist(ctx->glitch_rng);
-								block.h = sizeDist(ctx->glitch_rng);
-								block.x = std::clamp(xDist(ctx->glitch_rng), 0, std::max(0, s.card_w - block.w));
-								block.y = std::clamp(yDist(ctx->glitch_rng), 0, std::max(0, s.card_h - block.h));
-								block.channel = channelDist(ctx->glitch_rng);
-								block.offsetX = offsetDist(ctx->glitch_rng);
-								block.offsetY = offsetDist(ctx->glitch_rng);
-								ctx->glitch_channel_blocks.push_back(block);
-							}
+						if (needCompose) {
+							compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
 						}
-
-						needCompose = true;
-					}
-
-					if (needCompose) {
-						compose_bitmap(ctx, ctx->last_song, ctx->last_artist, s);
 					}
 				}
-			}
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+		} catch (const winrt::hresult_error &ex) {
+			blog(LOG_ERROR, "[spotify_now_playing] poll_loop iteration failed: %ls", ex.message().c_str());
+			std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+		} catch (const std::exception &ex) {
+			blog(LOG_ERROR, "[spotify_now_playing] poll_loop iteration failed: %s", ex.what());
+			std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+		} catch (...) {
+			blog(LOG_ERROR, "[spotify_now_playing] poll_loop iteration failed: unknown exception");
+			std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
 		}
 	}
 
@@ -2904,7 +2944,13 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 static void spotify_source_update(void *data, obs_data_t *settings)
 {
 	auto *ctx = (spotify_source *)data;
-	apply_settings(ctx, settings);
+	try {
+		apply_settings(ctx, settings);
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_update failed: %s", ex.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_update failed: Unknown exception");
+	}
 }
 
 static void spotify_source_defaults(obs_data_t *settings)
@@ -3123,10 +3169,8 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 	return true;
 }
 
-static obs_properties_t *spotify_source_properties(void *data)
+static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 {
-	obs_properties_t *props = obs_properties_create();
-
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
 	obs_properties_add_bool(props, "track_change_animation_enabled", obs_module_text("TrackChangeAnimation"));
@@ -3268,40 +3312,78 @@ static obs_properties_t *spotify_source_properties(void *data)
 			obs_data_release(settings);
 		}
 	}
+}
 
-	return props;
+static obs_properties_t *spotify_source_properties(void *data)
+{
+	obs_properties_t *props = obs_properties_create();
+
+	try {
+		spotify_source_properties_impl(props, data);
+		return props;
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_properties failed: %s", ex.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_properties failed: Unknown exception");
+	}
+
+	//cleanup if fail
+	obs_properties_destroy(props);
+	return nullptr;
 }
 
 static void *spotify_source_create(obs_data_t *settings, obs_source_t *source)
 {
-	auto *ctx = new spotify_source();
-	ctx->source = source;
-	apply_settings(ctx, settings);
-	InitSourcesLists(ctx);
+	spotify_source *ctx = nullptr;
+	try {
+		ctx = new spotify_source();
+		ctx->source = source;
+		apply_settings(ctx, settings);
+		InitSourcesLists(ctx);
 
-	auto now = std::chrono::steady_clock::now();
-	ctx->autohide_reference_time = now;
-	ctx->last_autohide_tick = now;
-	ctx->last_playing_time = now;
+		auto now = std::chrono::steady_clock::now();
+		ctx->autohide_reference_time = now;
+		ctx->last_autohide_tick = now;
+		ctx->last_playing_time = now;
 
-	ctx->running = true;
-	ctx->poll_thread = std::thread(poll_loop, ctx);
-	return ctx;
+		ctx->running = true;
+		ctx->poll_thread = std::thread(poll_loop, ctx);
+		return ctx;
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_create failed: %s", ex.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_create failed: Unknown exception");
+	}
+
+	// cleanup if fail
+	delete ctx;
+	return nullptr;
 }
 
 static void spotify_source_destroy(void *data)
 {
 	auto *ctx = (spotify_source *)data;
+	if (!ctx)
+		return;
 
-	ctx->running = false;
-	if (ctx->poll_thread.joinable())
-		ctx->poll_thread.join();
+	try {
+		ctx->running = false;
+		if (ctx->poll_thread.joinable())
+			ctx->poll_thread.join();
 
-	if (ctx->texture) {
-		obs_enter_graphics();
-		gs_texture_destroy(ctx->texture);
-		obs_leave_graphics();
-		ctx->texture = nullptr;
+		if (ctx->texture) {
+			ScopedGraphics gfx;
+			gs_texture_destroy(ctx->texture);
+			ctx->texture = nullptr;
+		}
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_destroy failed: %s", ex.what());		
+		if (ctx->poll_thread.joinable())
+			ctx->poll_thread.detach();
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_destroy failed: Unknown exception");
+		if (ctx->poll_thread.joinable())
+			ctx->poll_thread.detach();
 	}
 
 	delete ctx;
@@ -3339,51 +3421,65 @@ static void spotify_source_tick(void *data, float)
 {
 	auto *ctx = (spotify_source *)data;
 
-	if (!ctx->new_bitmap_ready)
-		return;
+	try {
+		if (!ctx->new_bitmap_ready)
+			return;
 
-	std::vector<uint8_t> pixels;
-	uint32_t w = 0, h = 0;
-	{
-		std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
-		pixels = ctx->pending_pixels;
-		w = ctx->pending_w;
-		h = ctx->pending_h;
+		std::vector<uint8_t> pixels;
+		uint32_t w = 0, h = 0;
+		{
+			std::lock_guard<std::mutex> lock(ctx->bitmap_mutex);
+			pixels = ctx->pending_pixels;
+			w = ctx->pending_w;
+			h = ctx->pending_h;
+		}
+		ctx->new_bitmap_ready = false;
+
+		if (w == 0 || h == 0)
+			return;
+
+		{
+			ScopedGraphics gfx;
+			if (ctx->texture) {
+				gs_texture_destroy(ctx->texture);
+				ctx->texture = nullptr;
+			}
+			const uint8_t *data_ptr = pixels.data();
+			ctx->texture = gs_texture_create(w, h, GS_BGRA, 1, &data_ptr, 0);
+		}
+
+		ctx->tex_w = w;
+		ctx->tex_h = h;
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_tick failed: %s", ex.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_tick failed: Unknown exception");
 	}
-	ctx->new_bitmap_ready = false;
-
-	if (w == 0 || h == 0)
-		return;
-
-	obs_enter_graphics();
-	if (ctx->texture) {
-		gs_texture_destroy(ctx->texture);
-		ctx->texture = nullptr;
-	}
-	const uint8_t *data_ptr = pixels.data();
-	ctx->texture = gs_texture_create(w, h, GS_BGRA, 1, &data_ptr, 0);
-	obs_leave_graphics();
-
-	ctx->tex_w = w;
-	ctx->tex_h = h;
 }
 
 static void spotify_source_render(void *data, gs_effect_t *)
 {
 	auto *ctx = (spotify_source *)data;
-	if (!ctx->texture)
-		return;
 
-	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
-	gs_effect_set_texture(image, ctx->texture);
+	try {
+		if (!ctx->texture)
+			return;
 
-	gs_technique_t *tech = gs_effect_get_technique(effect, "Draw");
-	gs_technique_begin(tech);
-	gs_technique_begin_pass(tech, 0);
-	gs_draw_sprite(ctx->texture, 0, ctx->tex_w, ctx->tex_h);
-	gs_technique_end_pass(tech);
-	gs_technique_end(tech);
+		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+		gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
+		gs_effect_set_texture(image, ctx->texture);
+
+		gs_technique_t *tech = gs_effect_get_technique(effect, "Draw");
+		gs_technique_begin(tech);
+		gs_technique_begin_pass(tech, 0);
+		gs_draw_sprite(ctx->texture, 0, ctx->tex_w, ctx->tex_h);
+		gs_technique_end_pass(tech);
+		gs_technique_end(tech);
+	} catch (const std::exception &ex) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_render failed: %s", ex.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_render failed: Unknown exception");
+	}
 }
 
 // ---------------------------------------------------------------------
