@@ -96,7 +96,7 @@ constexpr int DEFAULT_VU_HEIGHT = 43;
 constexpr int DEFAULT_VU_BAR_COUNT = 5;
 
 constexpr int DEFAULT_VHS_INTENSITY = 50;
-constexpr int DEFAULT_VHS_CHROMA_ABERRATION = 40;
+constexpr int DEFAULT_VHS_CHROMA_ABERRATION = 10;
 constexpr int VHS_NOISE_TEXTURE_SIZE = 64;
 constexpr int DEFAULT_VHS_SCANLINE_SPACING_PX = 3;
 constexpr int DEFAULT_VHS_SCANLINE_INTENSITY = 50; // 0..100
@@ -555,7 +555,13 @@ void PaintTextRun(Graphics &g, const std::wstring &text, Font &font, Brush &fill
 	g.SetSmoothingMode(prevSmoothing);
 }
 
-void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool outlineEnabled, float outlineWidthPx, const Color &outlineColor, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx)
+struct ScrollMeasureCache {
+	std::wstring text;
+	Font *font = nullptr;
+	RectF measured{};
+};
+
+void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush &brush, const RectF &bounds, double scrollOffsetPx, bool centerWhenStatic, bool outlineEnabled, float outlineWidthPx, const Color &outlineColor, bool *outNeedsScroll, double *outAvgCharPx, double *outMaxOffsetPx, ScrollMeasureCache *measureCache = nullptr)
 {
 	*outNeedsScroll = false;
 	*outMaxOffsetPx = 0.0;
@@ -568,7 +574,16 @@ void DrawScrollableLine(Graphics &g, const std::wstring &text, Font &font, Brush
 	sf.SetFormatFlags(sf.GetFormatFlags() | StringFormatFlagsNoWrap);
 
 	RectF measured;
-	g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
+	if (measureCache && measureCache->font == &font && measureCache->text == text) {
+		measured = measureCache->measured;
+	} else {
+		g.MeasureString(text.c_str(), -1, &font, PointF(0, 0), &sf, &measured);
+		if (measureCache) {
+			measureCache->text = text;
+			measureCache->font = &font;
+			measureCache->measured = measured;
+		}
+	}
 	*outAvgCharPx = std::max(1.0, (double)measured.Width / (double)text.length());
 
 	if (measured.Width <= bounds.Width) {
@@ -818,6 +833,14 @@ struct spotify_source {
 	double title_scroll_max_px = 0.0;
 	double artist_scroll_max_px = 0.0;
 	bool title_scroll_paused_at_end = false;
+
+	std::string cached_wtitle_src;
+	std::wstring cached_wtitle;
+	std::string cached_wartist_src;
+	std::wstring cached_wartist;
+
+	ScrollMeasureCache title_measure_cache;
+	ScrollMeasureCache artist_measure_cache;
 	bool artist_scroll_paused_at_end = false;
 	bool title_scroll_paused_at_start = false;
 	bool artist_scroll_paused_at_start = false;
@@ -877,6 +900,8 @@ struct spotify_source {
 	std::unique_ptr<Bitmap> cached_bitmap;
 	int cached_bitmap_w = 0;
 	int cached_bitmap_h = 0;
+
+	std::vector<uint8_t> overlay_scratch_pixels;
 
 	CachedFont title_font_cache;
 	CachedFont artist_font_cache;
@@ -1202,7 +1227,8 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 		BitmapData bd;
 		Rect full(0, 0, cardW, cardH);
 		if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
-			std::vector<uint8_t> src((size_t)cardW * cardH * 4);
+			ctx->overlay_scratch_pixels.resize((size_t)cardW * cardH * 4);
+			std::vector<uint8_t> &src = ctx->overlay_scratch_pixels;
 			const uint8_t *srcRow = (const uint8_t *)bd.Scan0;
 			for (int y = 0; y < cardH; y++)
 				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
@@ -1278,7 +1304,7 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 	}
 
 	int scanlineSpacing = std::max(1, s.vhs_scanline_spacing);
-	Color scanColor(std::clamp((int)(70.0f * t * (std::clamp(s.vhs_scanline_intensity, 0, 100) / 100.0f) * 2.0f), 0, 255), 0, 0, 0);
+	Color scanColor(std::clamp((int)(70.0f * t * (std::clamp(s.vhs_scanline_intensity, 0, 100) / 100.0f) * 6.0f), 0, 255), 0, 0, 0);
 	SolidBrush scanBrush(scanColor);
 	for (int y = -scanlineSpacing + ctx->vhs_scanline_offset; y < cardH; y += scanlineSpacing)
 		g.FillRectangle(&scanBrush, Rect(0, y, cardW, 1));
@@ -1470,14 +1496,27 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 	}
 
 	int hairCount = expectedCountRoll((s.eightmm_scratch_intensity / 100.0) * s.eightmm_scratch_max_count);
-	for (int i = 0; i < hairCount; i++) {
-		std::uniform_real_distribution<double> startXDist(0.0, (double)cardW);
-		std::uniform_real_distribution<double> startYDist(0.0, (double)cardH);
-		std::uniform_real_distribution<double> angleDist(0.0, 6.28318530718);
-		std::uniform_real_distribution<double> turnDist(-0.5, 0.5);
-		std::uniform_real_distribution<double> stepLenDist(4.0, 10.0);
-		std::uniform_int_distribution<int> segCountDist(14, 32);
 
+	// double check this works?
+	std::uniform_real_distribution<double> startXDist(0.0, (double)cardW);
+	std::uniform_real_distribution<double> startYDist(0.0, (double)cardH);
+	std::uniform_real_distribution<double> angleDist(0.0, 6.28318530718);
+	std::uniform_real_distribution<double> turnDist(-0.5, 0.5);
+	std::uniform_real_distribution<double> stepLenDist(4.0, 10.0);
+	std::uniform_int_distribution<int> segCountDist(14, 32);
+
+	int coreAlpha = std::clamp((int)(150.0f * t), 0, 255);
+	Pen glowPen(Color(coreAlpha / 4, 235, 225, 200), 3.0f);
+	glowPen.SetLineJoin(LineJoinRound);
+	glowPen.SetStartCap(LineCapRound);
+	glowPen.SetEndCap(LineCapRound);
+
+	Pen corePen(Color(coreAlpha, 245, 235, 210), 1.0f);
+	corePen.SetLineJoin(LineJoinRound);
+	corePen.SetStartCap(LineCapRound);
+	corePen.SetEndCap(LineCapRound);
+
+	for (int i = 0; i < hairCount; i++) {
 		REAL x = (REAL)startXDist(ctx->eightmm_rng);
 		REAL y = (REAL)startYDist(ctx->eightmm_rng);
 		double angle = angleDist(ctx->eightmm_rng);
@@ -1500,17 +1539,7 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 		GraphicsPath hairPath;
 		hairPath.AddCurve(pts.data(), (INT)pts.size(), 0.3f);
 
-		int coreAlpha = std::clamp((int)(150.0f * t), 0, 255);
-		Pen glowPen(Color(coreAlpha / 4, 235, 225, 200), 3.0f);
-		glowPen.SetLineJoin(LineJoinRound);
-		glowPen.SetStartCap(LineCapRound);
-		glowPen.SetEndCap(LineCapRound);
 		g.DrawPath(&glowPen, &hairPath);
-
-		Pen corePen(Color(coreAlpha, 245, 235, 210), 1.0f);
-		corePen.SetLineJoin(LineJoinRound);
-		corePen.SetStartCap(LineCapRound);
-		corePen.SetEndCap(LineCapRound);
 		g.DrawPath(&corePen, &hairPath);
 	}
 
@@ -1529,6 +1558,9 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 		std::uniform_int_distribution<int> clusterCountDist(2, 4);
 		std::uniform_int_distribution<int> clusterSpreadDist(-3, 3);
 
+		SolidBrush dustBrush(Color(0, 0, 0, 0));
+		Pen dustPen(Color(0, 0, 0, 0), 1.0f);
+
 		for (int i = 0; i < dustCount; i++) {
 			int dx = dxDist(ctx->eightmm_rng);
 			int dy = dyDist(ctx->eightmm_rng);
@@ -1539,16 +1571,16 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 			int shapeRoll = shapeDist(ctx->eightmm_rng);
 			if (shapeRoll < 50) {
 				// plain speck -- the common case
-				SolidBrush b(c);
-				g.FillRectangle(&b, Rect(dx, dy, 1, 1));
+				dustBrush.SetColor(c);
+				g.FillRectangle(&dustBrush, Rect(dx, dy, 1, 1));
 			} else if (shapeRoll < 72) {
 				// short angled fleck/fiber
-				Pen p(c, 1.0f);
+				dustPen.SetColor(c);
 				double ang = angleDist(ctx->eightmm_rng);
 				double len = flkLenDist(ctx->eightmm_rng);
 				REAL ex = (REAL)(dx + std::cos(ang) * len);
 				REAL ey = (REAL)(dy + std::sin(ang) * len);
-				g.DrawLine(&p, (REAL)dx, (REAL)dy, ex, ey);
+				g.DrawLine(&dustPen, (REAL)dx, (REAL)dy, ex, ey);
 			} else if (shapeRoll < 90) {
 				// small irregular blob
 				int nPts = blobPtCountDist(ctx->eightmm_rng);
@@ -1561,16 +1593,16 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 				}
 				GraphicsPath blobPath;
 				blobPath.AddPolygon(blobPts.data(), (INT)blobPts.size());
-				SolidBrush b(c);
-				g.FillPath(&b, &blobPath);
+				dustBrush.SetColor(c);
+				g.FillPath(&dustBrush, &blobPath);
 			} else {
 				// loose cluster of a few pixels
-				SolidBrush b(c);
+				dustBrush.SetColor(c);
 				int clusterCount = clusterCountDist(ctx->eightmm_rng);
 				for (int k = 0; k < clusterCount; k++) {
 					int cx = dx + clusterSpreadDist(ctx->eightmm_rng);
 					int cy = dy + clusterSpreadDist(ctx->eightmm_rng);
-					g.FillRectangle(&b, Rect(cx, cy, 1, 1));
+					g.FillRectangle(&dustBrush, Rect(cx, cy, 1, 1));
 				}
 			}
 		}
@@ -1677,7 +1709,8 @@ static void DrawGlitchOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Gr
 		BitmapData bd;
 		Rect full(0, 0, cardW, cardH);
 		if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
-			std::vector<uint8_t> src((size_t)cardW * cardH * 4);
+			ctx->overlay_scratch_pixels.resize((size_t)cardW * cardH * 4);
+			std::vector<uint8_t> &src = ctx->overlay_scratch_pixels;
 			const uint8_t *srcRow = (const uint8_t *)bd.Scan0;
 			for (int y = 0; y < cardH; y++)
 				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
@@ -1981,14 +2014,23 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 	const std::string &displayTitle = useAttribution ? kAttributionTitle : title;
 	const std::string &displayArtist = useAttribution ? kAttributionArtist : artist;
 
-	std::wstring wtitle = Utf8ToWide(displayTitle);
-	std::wstring wartist = Utf8ToWide(displayArtist);
+	if (ctx->cached_wtitle_src != displayTitle) {
+		ctx->cached_wtitle_src = displayTitle;
+		ctx->cached_wtitle = Utf8ToWide(displayTitle);
+	}
+	if (ctx->cached_wartist_src != displayArtist) {
+		ctx->cached_wartist_src = displayArtist;
+		ctx->cached_wartist = Utf8ToWide(displayArtist);
+	}
+
+	const std::wstring &wtitle = ctx->cached_wtitle;
+	const std::wstring &wartist = ctx->cached_wartist;
 
 	bool titleScroll = false, artistScroll = false;
 	double titleAvgChar = ctx->title_avg_char_px, artistAvgChar = ctx->artist_avg_char_px;
 	double titleMaxOffset = ctx->title_scroll_max_px, artistMaxOffset = ctx->artist_scroll_max_px;
-	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, s.title_outline_enabled, (float)s.title_outline_size, titleOutlineColor, &titleScroll, &titleAvgChar, &titleMaxOffset);
-	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText, s.artist_outline_enabled, (float)s.artist_outline_size, artistOutlineColor, &artistScroll, &artistAvgChar, &artistMaxOffset);
+	DrawScrollableLine(g, wtitle, titleFont, titleBrush, titleRect, ctx->title_scroll_px, centerText, s.title_outline_enabled, (float)s.title_outline_size, titleOutlineColor, &titleScroll, &titleAvgChar, &titleMaxOffset, &ctx->title_measure_cache);
+	DrawScrollableLine(g, wartist, artistFont, artistBrush, artistRect, ctx->artist_scroll_px, centerText, s.artist_outline_enabled, (float)s.artist_outline_size, artistOutlineColor, &artistScroll, &artistAvgChar, &artistMaxOffset, &ctx->artist_measure_cache);
 	ctx->title_needs_scroll = titleScroll;
 	ctx->artist_needs_scroll = artistScroll;
 	ctx->title_avg_char_px = titleAvgChar;
@@ -2035,20 +2077,15 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 
 static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
 {
-	__try
-	{
-		compose_bitmap_impl(ctx, title, artist, s, settings_changed);		
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER)
-	{
-		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW)
-		{
-			_resetstkoflw();			
+	__try {
+		compose_bitmap_impl(ctx, title, artist, s, settings_changed);
+	} __except (EXCEPTION_EXECUTE_HANDLER) {
+		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) {
+			_resetstkoflw();
 		}
-		blog(LOG_ERROR, "[spotify_now_playing] compose_bitmap failed: structured exception 0x%08lX", GetExceptionCode());		
-	}	
+		blog(LOG_ERROR, "[spotify_now_playing] compose_bitmap failed: structured exception 0x%08lX", GetExceptionCode());
+	}
 }
-
 
 static AppearanceSettings snapshot_settings(spotify_source *ctx)
 {
@@ -3377,7 +3414,7 @@ static void spotify_source_destroy(void *data)
 			ctx->texture = nullptr;
 		}
 	} catch (const std::exception &ex) {
-		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_destroy failed: %s", ex.what());		
+		blog(LOG_ERROR, "[spotify_now_playing] spotify_source_destroy failed: %s", ex.what());
 		if (ctx->poll_thread.joinable())
 			ctx->poll_thread.detach();
 	} catch (...) {
