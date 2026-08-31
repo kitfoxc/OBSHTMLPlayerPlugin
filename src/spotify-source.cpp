@@ -824,6 +824,9 @@ struct spotify_source {
 	std::vector<uint8_t> last_art_bytes;
 	bool have_track = false;
 
+	std::unique_ptr<Bitmap> cached_blurred_art;
+	bool cached_blurred_art_valid = false;
+
 	bool title_needs_scroll = false;
 	bool artist_needs_scroll = false;
 	double title_scroll_px = 0.0;
@@ -902,6 +905,8 @@ struct spotify_source {
 	int cached_bitmap_h = 0;
 
 	std::vector<uint8_t> overlay_scratch_pixels;
+
+	std::vector<std::array<uint8_t, 4>> glitch_sort_scratch;
 
 	CachedFont title_font_cache;
 	CachedFont artist_font_cache;
@@ -1094,6 +1099,7 @@ static bool ArtBytesDiffer(const std::vector<uint8_t> &cached, const uint8_t *im
 
 static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int image_len)
 {
+	ctx->cached_blurred_art_valid = false;
 	ctx->cached_art_image.reset();
 	if (image_data == nullptr || image_len <= 0) {
 		ctx->last_art_bytes.clear();
@@ -1118,7 +1124,7 @@ static void UpdateCachedArt(spotify_source *ctx, const uint8_t *image_data, int 
 	ctx->last_art_bytes.assign(image_data, image_data + image_len);
 }
 
-static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPath, int cardW, int cardH, int blurPct, int opacityPercent)
+static void DrawAlbumArtBackground(Graphics &g, spotify_source *ctx, Image *art, GraphicsPath &clipPath, int cardW, int cardH, int blurPct, int opacityPercent)
 {
 	if (!art)
 		return;
@@ -1148,19 +1154,32 @@ static void DrawAlbumArtBackground(Graphics &g, Image *art, GraphicsPath &clipPa
 	RectF destRect(0.0f, 0.0f, (REAL)cardW, (REAL)cardH);
 	int pct = std::clamp(blurPct, 0, 100);
 
+	if (ctx->settings_dirty)
+		ctx->cached_blurred_art_valid = false;
+
 	bool blurred = false;
 	if (pct > 0) {
-		Bitmap cropped(cardW, cardH, PixelFormat32bppARGB);
-		Graphics gc(&cropped);
-		gc.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-		gc.SetSmoothingMode(SmoothingModeHighQuality);
-		gc.Clear(Color(0, 0, 0, 0));
-		gc.DrawImage(art, destRect, 0.0f, srcY, srcW, srcCropH, UnitPixel, nullptr);
+		if (!ctx->cached_blurred_art || !ctx->cached_blurred_art_valid) {
+			auto cropped = std::make_unique<Bitmap>(cardW, cardH, PixelFormat32bppARGB);
+			Graphics gc(cropped.get());
+			gc.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+			gc.SetSmoothingMode(SmoothingModeHighQuality);
+			gc.Clear(Color(0, 0, 0, 0));
+			gc.DrawImage(art, destRect, 0.0f, srcY, srcW, srcCropH, UnitPixel, nullptr);
 
-		Gdiplus::Blur blurEffect;
-		Gdiplus::BlurParams blurParams = {(pct / 100.0f) * 40.0f, FALSE}; // 0-100% -> ~0-40px radius
-		if (blurEffect.SetParameters(&blurParams) == Ok && cropped.ApplyEffect(&blurEffect, nullptr) == Ok) {
-			g.DrawImage(&cropped, destRect, 0.0f, 0.0f, (REAL)cardW, (REAL)cardH, UnitPixel, &attr);
+			Gdiplus::Blur blurEffect;
+			Gdiplus::BlurParams blurParams = {(pct / 100.0f) * 40.0f, FALSE}; // 0-100% -> ~0-40px radius
+			if (blurEffect.SetParameters(&blurParams) == Ok && cropped->ApplyEffect(&blurEffect, nullptr) == Ok) {
+				ctx->cached_blurred_art = std::move(cropped);
+				ctx->cached_blurred_art_valid = true;
+			} else {
+				ctx->cached_blurred_art.reset();
+				ctx->cached_blurred_art_valid = false;
+			}
+		}
+
+		if (ctx->cached_blurred_art_valid) {
+			g.DrawImage(ctx->cached_blurred_art.get(), destRect, 0.0f, 0.0f, (REAL)cardW, (REAL)cardH, UnitPixel, &attr);
 			blurred = true;
 		}
 	}
@@ -1304,6 +1323,8 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 	}
 
 	int scanlineSpacing = std::max(1, s.vhs_scanline_spacing);
+	// Scaled 3x vs. the original formula: what used to be 100% intensity now sits at
+	// ~33%, and 100% now reaches 3x the old maximum scanline darkness (before clamping).
 	Color scanColor(std::clamp((int)(70.0f * t * (std::clamp(s.vhs_scanline_intensity, 0, 100) / 100.0f) * 6.0f), 0, 255), 0, 0, 0);
 	SolidBrush scanBrush(scanColor);
 	for (int y = -scanlineSpacing + ctx->vhs_scanline_offset; y < cardH; y += scanlineSpacing)
@@ -1497,7 +1518,6 @@ static void DrawEightMmOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, G
 
 	int hairCount = expectedCountRoll((s.eightmm_scratch_intensity / 100.0) * s.eightmm_scratch_max_count);
 
-	// double check this works?
 	std::uniform_real_distribution<double> startXDist(0.0, (double)cardW);
 	std::uniform_real_distribution<double> startYDist(0.0, (double)cardH);
 	std::uniform_real_distribution<double> angleDist(0.0, 6.28318530718);
@@ -1777,13 +1797,14 @@ static void DrawGlitchOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Gr
 					int runEnd = x; // exclusive
 
 					if (runEnd - runStart >= 2) {
-						std::vector<std::array<uint8_t, 4>> px;
+						std::vector<std::array<uint8_t, 4>> &px = ctx->glitch_sort_scratch;
+						px.clear();
 						px.reserve(runEnd - runStart);
 						for (int i = runStart; i < runEnd; i++) {
 							uint8_t *p = row + (size_t)i * 4;
 							px.push_back({p[0], p[1], p[2], p[3]});
 						}
-						std::sort(px.begin(), px.end(), [](const std::array<uint8_t, 4> &a, const std::array<uint8_t, 4> &b) { return (0.114f * a[0] + 0.587f * a[1] + 0.299f * a[2]) < (0.114f * b[0] + 0.587f * b[1] + 0.299f * b[2]); });
+						std::sort(px.begin(), px.end(), [&](const std::array<uint8_t, 4> &a, const std::array<uint8_t, 4> &b) { return luminance(a.data()) < luminance(b.data()); });
 						for (int i = 0; i < (int)px.size(); i++) {
 							uint8_t *p = row + (size_t)(runStart + i) * 4;
 							p[0] = px[(size_t)i][0];
@@ -1801,7 +1822,7 @@ static void DrawGlitchOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Gr
 	g.SetClip(&savedClip);
 }
 
-static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed)
+static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s)
 {
 	const int cardW = std::max(s.card_w, 50);
 	const int cardH = std::max(s.card_h, 30);
@@ -1816,6 +1837,8 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 
 	g.SetSmoothingMode(SmoothingModeHighQuality);
 	g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+	g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+	g.SetCompositingQuality(CompositingQualityHighQuality);
 	g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
 	g.Clear(Color(0, 0, 0, 0));
 
@@ -1825,10 +1848,10 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 
 	Image *bgImage = nullptr;
 	if (s.use_album_art_as_bg && ctx->cached_art_image) {
-		DrawAlbumArtBackground(g, ctx->cached_art_image.get(), bgPath, cardW, cardH, s.album_art_bg_blur_pct, s.bg_opacity);
+		DrawAlbumArtBackground(g, ctx, ctx->cached_art_image.get(), bgPath, cardW, cardH, s.album_art_bg_blur_pct, s.bg_opacity);
 	} else {
 		if (s.use_bg_image) {
-			if (!ctx->cached_bg_image || settings_changed)
+			if (!ctx->cached_bg_image || ctx->settings_dirty)
 				bgImage = EnsureBackgroundImage(ctx, s.bg_image_path);
 			else
 				bgImage = ctx->cached_bg_image.get();
@@ -2022,7 +2045,6 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 		ctx->cached_wartist_src = displayArtist;
 		ctx->cached_wartist = Utf8ToWide(displayArtist);
 	}
-
 	const std::wstring &wtitle = ctx->cached_wtitle;
 	const std::wstring &wartist = ctx->cached_wartist;
 
@@ -2075,10 +2097,10 @@ static void compose_bitmap_impl(spotify_source *ctx, const std::string &title, c
 	ctx->new_bitmap_ready = true;
 }
 
-static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s, bool settings_changed = false)
+static void compose_bitmap(spotify_source *ctx, const std::string &title, const std::string &artist, const AppearanceSettings &s)
 {
 	__try {
-		compose_bitmap_impl(ctx, title, artist, s, settings_changed);
+		compose_bitmap_impl(ctx, title, artist, s);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		if (GetExceptionCode() == EXCEPTION_STACK_OVERFLOW) {
 			_resetstkoflw();
@@ -2278,7 +2300,7 @@ static void poll_loop(spotify_source *ctx)
 					ctx->artist_scroll_paused_at_start = true;
 					ctx->title_pause_start = now;
 					ctx->artist_pause_start = now;
-					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
+					compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 				}
 			} else if (ctx->have_track) {
 				ctx->is_playing = false;
@@ -2309,7 +2331,7 @@ static void poll_loop(spotify_source *ctx)
 					compose_bitmap(ctx, "", "", snapshot_settings(ctx));
 				}
 			} else if (ctx->settings_dirty) {
-				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx), /*settings_changed=*/true);
+				compose_bitmap(ctx, ctx->last_song, ctx->last_artist, snapshot_settings(ctx));
 			}
 			ctx->settings_dirty = false;
 
