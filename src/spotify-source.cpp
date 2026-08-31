@@ -111,8 +111,7 @@ constexpr int DEFAULT_VHS_TRACKING_MAX_THICKNESS_PX = 4;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MIN_PX = 1.0;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MAX_PX = 4.5;
 constexpr double DEFAULT_VHS_TRACKING_BRIGHTEN = 0.00; // 0..1
-constexpr double DEFAULT_VHS_CHROMA_MAX_OFFSET_PX = 6.0;
-constexpr double DEFAULT_VHS_CHROMA_VERTICAL_JITTER = 0.015;
+constexpr double VHS_CHROMA_MAX_SHIFT_PX = 10.0;       // full-scale (100) horizontal split for each channel
 constexpr int DEFAULT_VHS_GLITCH_CHANCE_PCT = 8;
 constexpr int DEFAULT_VHS_GLITCH_MAX_BANDS = 4;
 constexpr int DEFAULT_VHS_GRAIN_AMOUNT = 50;
@@ -755,8 +754,6 @@ struct GlitchChannelBlock {
 	X(double, vhs_tracking_jitter_min, DEFAULT_VHS_TRACKING_JITTER_MIN_PX) \
 	X(double, vhs_tracking_jitter_max, DEFAULT_VHS_TRACKING_JITTER_MAX_PX) \
 	X(double, vhs_tracking_brighten, DEFAULT_VHS_TRACKING_BRIGHTEN) \
-	X(double, vhs_chroma_max_offset, DEFAULT_VHS_CHROMA_MAX_OFFSET_PX) \
-	X(double, vhs_chroma_vertical_jitter, DEFAULT_VHS_CHROMA_VERTICAL_JITTER) \
 	X(int, vhs_glitch_chance_pct, DEFAULT_VHS_GLITCH_CHANCE_PCT) \
 	X(int, vhs_glitch_max_bands, DEFAULT_VHS_GLITCH_MAX_BANDS) \
 	X(int, vhs_grain_amount, DEFAULT_VHS_GRAIN_AMOUNT) \
@@ -865,9 +862,6 @@ struct spotify_source {
 	bool vhs_glitch_active = false;
 	int vhs_glitch_y = 0;
 	std::unique_ptr<Bitmap> vhs_noise_texture;
-	float vhs_ca_r_dx = 0.0f, vhs_ca_r_dy = 0.0f;
-	float vhs_ca_b_dx = 0.0f, vhs_ca_b_dy = 0.0f;
-	bool vhs_ca_red_active = true;
 	bool vhs_tracking_active = false;
 	int vhs_tracking_line_y = 0;
 	int vhs_tracking_line_count = 3;
@@ -1253,33 +1247,20 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
 			card.UnlockBits(&bd);
 
-			REAL maxOffsetPx = (REAL)s.vhs_chroma_max_offset * ca;
-			REAL vJitter = (REAL)s.vhs_chroma_vertical_jitter;
+			REAL maxOffsetPx = (REAL)VHS_CHROMA_MAX_SHIFT_PX * ca;
 
-			auto stochasticRound = [&](double val) -> int {
-				double sign = val < 0.0 ? -1.0 : 1.0;
-				double absVal = std::fabs(val);
-				int whole = (int)std::floor(absVal);
-				double frac = absVal - whole;
-				std::uniform_real_distribution<double> d(0.0, 1.0);
-				if (d(ctx->vhs_rng) < frac)
-					whole += 1;
-				return (int)(sign * whole);
-			};
+			double rdx = -(double)maxOffsetPx; 
+			double bdx = (double)maxOffsetPx;  
 
-			int rdx = 0, rdy = 0, bdx = 0, bdy = 0;
-			if (ctx->vhs_ca_red_active) {
-				rdx = stochasticRound(ctx->vhs_ca_r_dx * maxOffsetPx);
-				rdy = stochasticRound(ctx->vhs_ca_r_dy * maxOffsetPx * vJitter);
-			} else {
-				bdx = stochasticRound(ctx->vhs_ca_b_dx * maxOffsetPx);
-				bdy = stochasticRound(ctx->vhs_ca_b_dy * maxOffsetPx * vJitter);
-			}
-
-			auto sampleChannel = [&](int x, int y, int channel) -> uint8_t {
-				x = std::clamp(x, 0, cardW - 1);
+			auto sampleChannel = [&](double x, int y, int channel) -> uint8_t {
 				y = std::clamp(y, 0, cardH - 1);
-				return src[((size_t)y * cardW + (size_t)x) * 4 + (size_t)channel];
+				int x0 = (int)std::floor(x);
+				int x1 = x0 + 1;
+				double fx = x - x0;
+				const uint8_t *rowSrc = &src[(size_t)y * cardW * 4];
+				double v0 = (x0 >= 0 && x0 < cardW) ? (double)rowSrc[(size_t)x0 * 4 + (size_t)channel] : 0.0;
+				double v1 = (x1 >= 0 && x1 < cardW) ? (double)rowSrc[(size_t)x1 * 4 + (size_t)channel] : 0.0;
+				return (uint8_t)std::lround(v0 + (v1 - v0) * fx);
 			};
 
 			if (card.LockBits(&full, ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
@@ -1289,9 +1270,9 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 					for (int x = 0; x < cardW; x++) {
 						size_t origIdx = ((size_t)y * cardW + (size_t)x) * 4;
 						uint8_t *px = row + (size_t)x * 4;
-						px[0] = sampleChannel(x + bdx, y + bdy, 0);
+						px[0] = sampleChannel(x + bdx, y, 0);
 						px[1] = src[origIdx + 1];
-						px[2] = sampleChannel(x + rdx, y + rdy, 2);
+						px[2] = sampleChannel(x + rdx, y, 2);
 						px[3] = src[origIdx + 3];
 					}
 				}
@@ -2473,12 +2454,6 @@ static void poll_loop(spotify_source *ctx)
 							}
 
 							std::uniform_real_distribution<double> jitterDist(-1.0, 1.0);
-							ctx->vhs_ca_r_dx = (float)jitterDist(ctx->vhs_rng);
-							ctx->vhs_ca_r_dy = (float)jitterDist(ctx->vhs_rng);
-							ctx->vhs_ca_b_dx = (float)jitterDist(ctx->vhs_rng);
-							ctx->vhs_ca_b_dy = (float)jitterDist(ctx->vhs_rng);
-							std::uniform_int_distribution<int> coinFlip(0, 1);
-							ctx->vhs_ca_red_active = coinFlip(ctx->vhs_rng) == 0;
 
 							int trackingMinMs = std::max(1, s.vhs_tracking_min_interval_s) * 1000;
 							int trackingMaxMs = std::max(trackingMinMs, s.vhs_tracking_max_interval_s * 1000);
@@ -2713,7 +2688,7 @@ static const char *const kSettingsStringKeys[] = {
 };
 
 static const char *const kSettingsDoubleKeys[] = {
-	"vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_chroma_max_offset", "vhs_chroma_vertical_jitter", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
+	"vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
 };
 
 static const char *const kSettingsObjKeys[] = {
@@ -2848,8 +2823,6 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 	ctx->vhs_tracking_jitter_min = obs_data_get_double(settings, "vhs_tracking_jitter_min");
 	ctx->vhs_tracking_jitter_max = obs_data_get_double(settings, "vhs_tracking_jitter_max");
 	ctx->vhs_tracking_brighten = std::clamp(obs_data_get_double(settings, "vhs_tracking_brighten"), 0.0, 1.0);
-	ctx->vhs_chroma_max_offset = obs_data_get_double(settings, "vhs_chroma_max_offset");
-	ctx->vhs_chroma_vertical_jitter = std::clamp(obs_data_get_double(settings, "vhs_chroma_vertical_jitter"), 0.0, 1.0);
 	ctx->vhs_glitch_chance_pct = std::clamp((int)obs_data_get_int(settings, "vhs_glitch_chance_pct"), 0, 100);
 	ctx->vhs_glitch_max_bands = std::max(1, (int)obs_data_get_int(settings, "vhs_glitch_max_bands"));
 	ctx->vhs_grain_amount = std::clamp((int)obs_data_get_int(settings, "vhs_grain_amount"), 0, 100);
@@ -3041,8 +3014,6 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_double(settings, "vhs_tracking_jitter_min", DEFAULT_VHS_TRACKING_JITTER_MIN_PX);
 	obs_data_set_default_double(settings, "vhs_tracking_jitter_max", DEFAULT_VHS_TRACKING_JITTER_MAX_PX);
 	obs_data_set_default_double(settings, "vhs_tracking_brighten", DEFAULT_VHS_TRACKING_BRIGHTEN);
-	obs_data_set_default_double(settings, "vhs_chroma_max_offset", DEFAULT_VHS_CHROMA_MAX_OFFSET_PX);
-	obs_data_set_default_double(settings, "vhs_chroma_vertical_jitter", DEFAULT_VHS_CHROMA_VERTICAL_JITTER);
 	obs_data_set_default_int(settings, "vhs_glitch_chance_pct", DEFAULT_VHS_GLITCH_CHANCE_PCT);
 	obs_data_set_default_int(settings, "vhs_glitch_max_bands", DEFAULT_VHS_GLITCH_MAX_BANDS);
 	obs_data_set_default_int(settings, "vhs_grain_amount", DEFAULT_VHS_GRAIN_AMOUNT);
@@ -3195,7 +3166,7 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 	bool isGlitch = style == "glitch";
 
 	static const char *const kVhsKeys[] = {
-		"vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_chroma_max_offset", "vhs_chroma_vertical_jitter", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount",
+		"vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount",
 	};
 	static const char *const kEightMmKeys[] = {
 		"eightmm_intensity", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_light_leak_position", "eightmm_light_leak_intensity", "eightmm_weave_px", "eightmm_flicker", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count",
@@ -3305,8 +3276,6 @@ static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 	obs_properties_add_float(props, "vhs_tracking_jitter_min", obs_module_text("VhsTrackingJitterMin"), 0.0, 40.0, 0.5);
 	obs_properties_add_float(props, "vhs_tracking_jitter_max", obs_module_text("VhsTrackingJitterMax"), 0.0, 40.0, 0.5);
 	obs_properties_add_float(props, "vhs_tracking_brighten", obs_module_text("VhsTrackingBrighten"), 0.0, 1.0, 0.05);
-	obs_properties_add_float(props, "vhs_chroma_max_offset", obs_module_text("VhsChromaMaxOffset"), 0.0, 40.0, 0.5);
-	obs_properties_add_float(props, "vhs_chroma_vertical_jitter", obs_module_text("VhsChromaVerticalJitter"), 0.0, 0.5, 0.005);
 	obs_properties_add_int(props, "vhs_glitch_chance_pct", obs_module_text("VhsGlitchChance"), 0, 100, 1);
 	obs_properties_add_int(props, "vhs_glitch_max_bands", obs_module_text("VhsGlitchMaxBands"), 1, 10, 1);
 
