@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OBS HTML Now Playing</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:"Segoe UI",system-ui,sans-serif}.card{width:100%;height:100%;display:flex;align-items:center;gap:20px;padding:18px;border-radius:24px;background:linear-gradient(135deg,rgba(255,255,255,.18),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.18);backdrop-filter:blur(28px);box-shadow:0 18px 60px rgba(0,0,0,.28);color:white;opacity:0;transform:translateY(12px) scale(.98);transition:.45s cubic-bezier(.2,.8,.2,1)}.card.ready{opacity:1;transform:none}.cover{width:112px;height:112px;flex:none;object-fit:cover;border-radius:18px;background:rgba(255,255,255,.08)}.info{min-width:0;flex:1}.title{font-size:24px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.artist{margin-top:7px;font-size:16px;opacity:.72;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.album{margin-top:3px;font-size:13px;opacity:.48;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.bar{height:4px;margin-top:20px;border-radius:99px;background:rgba(255,255,255,.18);overflow:hidden}.bar i{display:block;height:100%;width:0;background:white;border-radius:inherit;transform-origin:left;transition:width .2s linear}.time{display:flex;justify-content:space-between;margin-top:7px;font-size:11px;opacity:.5}.paused .bar i{opacity:.55}
+</style>
+</head>
+<body>
+<div class="card" id="card"><img class="cover" id="cover"><div class="info"><div class="title" id="title">Nothing playing</div><div class="artist" id="artist">—</div><div class="album" id="album">—</div><div class="bar"><i id="progress"></i></div><div class="time"><span id="pos">0:00</span><span id="dur">0:00</span></div></div></div>
+<script src="http://127.0.0.1:38765/obs-player.js"></script>
+<script>
+const $=id=>document.getElementById(id), card=$("card");
+const fmt=s=>{s=Math.max(0,Math.floor(s||0));return Math.floor(s/60)+":"+String(s%60).padStart(2,"0")};
+let state=obsPlayer.state;
+function draw(s){state=s;card.classList.toggle("ready",!!s.hasTrack);card.classList.toggle("paused",!s.playing);$("title").textContent=s.title||"Nothing playing";$("artist").textContent=s.artist||"—";$("album").textContent=s.album||"—";$("cover").src=s.albumArt||"";$("pos").textContent=fmt(s.position);$("dur").textContent=fmt(s.duration)}
+obsPlayer.on("state",draw);obsPlayer.on("trackchange",draw);draw(state);
+function tick(){if(state&&state.playing){const p=Math.min(state.duration,state.position+(performance.now()-state.timestamp*1000)/1000);$("progress").style.width=(state.duration?p/state.duration*100:0)+"%";$("pos").textContent=fmt(p)}requestAnimationFrame(tick)}tick();
+</script>
+</body>
+</html>
