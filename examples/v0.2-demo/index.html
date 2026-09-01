@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OBS HTML Player v0.2</title>
+<style>
+:root{font-family:Inter,Segoe UI,sans-serif;color:#fff}*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}.card{width:100%;height:100%;display:flex;align-items:center;gap:20px;padding:20px;border-radius:24px;background:rgba(20,20,24,.72);backdrop-filter:blur(24px);box-shadow:0 20px 60px rgba(0,0,0,.35)}.cover{width:140px;height:140px;flex:none;object-fit:cover;border-radius:18px;background:rgba(255,255,255,.08)}.meta{min-width:0;flex:1}.title,.artist,.album{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.title{font-size:28px;font-weight:700}.artist{margin-top:7px;font-size:18px;opacity:.82}.album{margin-top:4px;font-size:14px;opacity:.55}.track{height:4px;margin-top:22px;border-radius:99px;background:rgba(255,255,255,.16);overflow:hidden}.bar{height:100%;width:0;transform-origin:left center;background:#fff;border-radius:inherit}.status{margin-top:8px;font-size:12px;opacity:.5}.offline{opacity:.45}
+</style>
+</head>
+<body>
+<div class="card" id="card"><img class="cover" id="cover"><div class="meta"><div class="title" id="title">Waiting for media…</div><div class="artist" id="artist">OBS HTML Player</div><div class="album" id="album"></div><div class="track"><div class="bar" id="bar"></div></div><div class="status" id="status">Waiting for Windows media session</div></div></div>
+<script src="../../data/obs-plugins/obs-html-player/obs-player.js"></script>
+<script>
+const $=id=>document.getElementById(id);let s=obsPlayer.state;
+function render(v){s=v;$('title').textContent=v.title||'Waiting for media…';$('artist').textContent=v.artist||'OBS HTML Player';$('album').textContent=v.album||'';$('status').textContent=v.hasTrack?(v.playing?'Playing':'Paused')+' · '+(v.source||'SMTC'):'Waiting for Windows media session';if(v.albumArt)$('cover').src=v.albumArt;else $('cover').removeAttribute('src');}
+obsPlayer.on('state',render);obsPlayer.on('trackchange',render);
+function tick(){const v=obsPlayer.state;if(v.hasTrack&&v.duration>0){let p=v.position;if(v.playing)p+=(performance.now()/1000-v.timestamp);$('bar').style.width=Math.min(100,Math.max(0,p/v.duration*100))+'%';}requestAnimationFrame(tick)}tick();
+</script>
+</body></html>
