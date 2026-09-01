@@ -1,12 +1,13 @@
 #include "html-player-source.h"
 #include <obs-module.h>
 #include <windows.h>
-#include <winrt/base.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Media.Control.h>
-#include <winrt/Windows.Storage.Streams.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -22,30 +23,515 @@
 #include <algorithm>
 #include <cctype>
 #pragma comment(lib, "ws2_32.lib")
-using namespace winrt; using namespace Windows::Media::Control; using namespace Windows::Storage::Streams; namespace fs=std::filesystem;
+
+using namespace winrt;
+using namespace Windows::Media::Control;
+using namespace Windows::Storage::Streams;
+namespace fs = std::filesystem;
+
 namespace {
-constexpr unsigned short PORT=38765; constexpr int POLL=250; constexpr size_t MAX_FILE=16*1024*1024;
-struct State{bool has=false,playing=false;std::string title,artist,album,source,art;double duration=0,position=0;};
-struct Inst{std::string id;fs::path root,entry;};
-std::mutex sm,im; State state; std::map<std::string,std::weak_ptr<Inst>> insts; std::atomic_bool run=false; SOCKET srv=INVALID_SOCKET; std::thread server_thread,smtc_thread;
-const char* SDK=R"JS((()=>{const m=location.pathname.match(/^\/p\/([^/]+)\//),id=m?m[1]:'',o=location.origin,e=o+'/state',v=id?o+'/p/'+id+'/__version':'';let S={hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},V=null,L=new Map;const emit=(n,x)=>(L.get(n)||[]).forEach(f=>{try{f(x)}catch(_){}}),upd=x=>{const q=S;S=Object.assign({hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},x||{});if(q.title!==S.title||q.artist!==S.artist||q.album!==S.album||q.source!==S.source)emit('trackchange',S);if(q.playing!==S.playing)emit(S.playing?'play':'pause',S);if(q.hasTrack!==S.hasTrack)emit(S.hasTrack?'trackchange':'stop',S);if(q.albumArt!==S.albumArt)emit('albumart',S.albumArt);emit('state',S)};async function r(){try{let x=await fetch(e+'?t='+Date.now(),{cache:'no-store'});if(x.ok)upd(await x.json())}catch(_){}}async function c(){if(!v)return;try{let x=await fetch(v+'?t='+Date.now(),{cache:'no-store'});if(!x.ok)return;let n=await x.text();if(V!==null&&n!==V)location.reload();V=n}catch(_){}}function loop(){r().finally(()=>setTimeout(loop,250))}function vl(){c().finally(()=>setTimeout(vl,1000))}window.obsPlayer={get state(){return S},get playerId(){return id},get endpoint(){return e},on(n,f){if(!L.has(n))L.set(n,new Set);L.get(n).add(f);return()=>L.get(n)?.delete(f)},once(n,f){let x=this.on(n,y=>{x();f(y)});return x},refresh:r,getProgress(){return S.duration?Math.max(0,Math.min(1,S.position/S.duration)):0},getPosition(){if(!S.playing||!S.timestamp)return S.position;let n=performance.timeOrigin/1000+performance.now()/1000;return Math.max(0,Math.min(S.duration||Infinity,S.position+n-S.timestamp))}};window.OBSPlayer=window.obsPlayer;emit('ready',S);loop();vl()})();)JS";
-std::string esc(const std::string&s){std::ostringstream o;for(unsigned char c:s){switch(c){case'"':o<<"\\\"";break;case'\\':o<<"\\\\";break;case'\n':o<<"\\n";break;case'\r':o<<"\\r";break;case'\t':o<<"\\t";break;default:if(c<32)o<<"\\u"<<std::hex<<std::setw(4)<<std::setfill('0')<<(int)c;else o<<c;}}return o.str();}
-std::string b64(const uint8_t*d,size_t n){static const char*t="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";std::string o;o.reserve((n+2)/3*4);for(size_t i=0;i<n;i+=3){uint32_t v=uint32_t(d[i])<<16;if(i+1<n)v|=uint32_t(d[i+1])<<8;if(i+2<n)v|=d[i+2];o+=t[v>>18&63];o+=t[v>>12&63];o+=i+1<n?t[v>>6&63]:'=';o+=i+2<n?t[v&63]:'=';}return o;}
-std::string amime(const std::string&s){if(s=="image/png")return"image/png";if(s=="image/webp")return"image/webp";if(s=="image/gif")return"image/gif";return"image/jpeg";}
-void smtc_loop(){try{init_apartment(apartment_type::multi_threaded);auto mgr=GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();while(run){State n;try{auto ss=mgr.GetSessions();GlobalSystemMediaTransportControlsSession s=nullptr;for(uint32_t i=0;i<ss.Size();++i){auto x=ss.GetAt(i),id=to_string(x.SourceAppUserModelId());if(id.find("spotify")!=std::string::npos||id.find("youtube")!=std::string::npos||id.find("ytm")!=std::string::npos||id.find("applemusic")!=std::string::npos||id.find("cider")!=std::string::npos||id.find("vlc")!=std::string::npos||id.find("chrome")!=std::string::npos||id.find("msedge")!=std::string::npos||id.find("firefox")!=std::string::npos||id.find("opera")!=std::string::npos||id.find("brave")!=std::string::npos){s=x;break;}}if(s){auto p=s.TryGetMediaPropertiesAsync().get(),t=s.GetTimelineProperties(),b=s.GetPlaybackInfo();if(p&&b){n.has=true;n.playing=b.PlaybackStatus()==GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;n.title=to_string(p.Title());n.artist=to_string(p.Artist());n.album=to_string(p.AlbumTitle());n.source=to_string(s.SourceAppUserModelId());n.duration=std::max(0.0,std::chrono::duration<double>(t.EndTime()-t.StartTime()).count());n.position=std::max(0.0,std::chrono::duration<double>(t.Position()).count());auto th=p.Thumbnail();if(th){auto st=th.OpenReadAsync().get();uint32_t z=(uint32_t)st.Size();if(z&&z<MAX_FILE){DataReader r(st);r.LoadAsync(z).get();std::vector<uint8_t>x(z);r.ReadBytes(array_view<uint8_t>(x.data(),x.data()+z));n.art="data:"+amime(to_string(st.ContentType()))+";base64,"+b64(x.data(),x.size());}}}}}catch(...){ }{std::lock_guard<std::mutex>l(sm);state=std::move(n);}std::this_thread::sleep_for(std::chrono::milliseconds(POLL));}uninit_apartment();}catch(...){blog(LOG_ERROR,"[obs-html-player] SMTC initialization failed");}}
-std::string json(){std::lock_guard<std::mutex>l(sm);double now=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();std::ostringstream o;o<<"{\"hasTrack\":"<<(state.has?"true":"false")<<",\"playing\":"<<(state.playing?"true":"false")<<",\"paused\":"<<(!state.playing&&state.has?"true":"false")<<",\"stopped\":"<<(!state.has?"true":"false")<<",\"title\":\""<<esc(state.title)<<"\",\"artist\":\""<<esc(state.artist)<<"\",\"album\":\""<<esc(state.album)<<"\",\"source\":\""<<esc(state.source)<<"\",\"duration\":"<<state.duration<<",\"position\":"<<state.position<<",\"timestamp\":"<<now<<",\"albumArt\":\""<<esc(state.art)<<"\"}";return o.str();}
-std::string dec(std::string s){std::string o;for(size_t i=0;i<s.size();++i){if(s[i]=='%'&&i+2<s.size()){auto h=[](char c){if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;return-1;};int a=h(s[i+1]),b=h(s[i+2]);if(a>=0&&b>=0){o.push_back(char(a*16+b));i+=2;continue;}}o.push_back(s[i]);}return o;}
-bool safe(const fs::path&r,const fs::path&q,fs::path&o){try{auto a=fs::weakly_canonical(r),b=fs::weakly_canonical(r/q);auto x=a.native(),y=b.native();if(y.size()<x.size()||y.compare(0,x.size(),x)!=0||(y.size()>x.size()&&y[x.size()]!=fs::path::preferred_separator))return false;o=b;return true;}catch(...){return false;}}
-std::string type(const fs::path&p){auto e=p.extension().string();std::transform(e.begin(),e.end(),e.begin(),[](unsigned char c){return(char)std::tolower(c);});if(e==".html"||e==".htm")return"text/html; charset=utf-8";if(e==".css")return"text/css; charset=utf-8";if(e==".js"||e==".mjs")return"application/javascript; charset=utf-8";if(e==".json")return"application/json; charset=utf-8";if(e==".svg")return"image/svg+xml";if(e==".png")return"image/png";if(e==".jpg"||e==".jpeg")return"image/jpeg";if(e==".webp")return"image/webp";if(e==".gif")return"image/gif";if(e==".ico")return"image/x-icon";if(e==".woff")return"font/woff";if(e==".woff2")return"font/woff2";if(e==".ttf")return"font/ttf";if(e==".otf")return"font/otf";return"application/octet-stream";}
-void send(SOCKET s,int code,const std::string&b,const char*t){const char*m=code==200?"OK":code==403?"Forbidden":code==404?"Not Found":"Bad Request";std::ostringstream h;h<<"HTTP/1.1 "<<code<<" "<<m<<"\r\nContent-Type: "<<t<<"\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nContent-Length: "<<b.size()<<"\r\nConnection: close\r\n\r\n";auto x=h.str();::send(s,x.data(),(int)x.size(),0);if(!b.empty())::send(s,b.data(),(int)b.size(),0);}
-void file(SOCKET s,const fs::path&p,bool html){std::ifstream f(p,std::ios::binary);if(!f){send(s,404,"Not Found","text/plain");return;}auto z=fs::file_size(p);if(z>MAX_FILE){send(s,403,"File too large","text/plain");return;}std::string b((std::istreambuf_iterator<char>(f)),{});if(html){std::string x="<script src=\"/obs-player.js\"></script><style>html,body{margin:0;background:transparent}</style>";auto i=b.find("</head>");if(i==std::string::npos)b=x+b;else b.insert(i,x);}send(s,200,b,type(p).c_str());}
-std::shared_ptr<Inst> get(const std::string&id){std::lock_guard<std::mutex>l(im);auto x=insts.find(id);if(x==insts.end())return{};auto p=x->second.lock();if(!p)insts.erase(x);return p;}
-void server_loop(){while(run){sockaddr_in a{};int al=sizeof(a);SOCKET c=accept(srv,(sockaddr*)&a,&al);if(c==INVALID_SOCKET)continue;char buf[8192]{};int n=recv(c,buf,sizeof(buf)-1,0);if(n>0){std::string q(buf,n),line=q.substr(0,q.find("\r\n"));if(line.rfind("GET ",0)!=0){send(c,400,"Bad Request","text/plain");closesocket(c);continue;}auto p=line.find(' ',4);std::string u=line.substr(4,p-4),path=u.substr(0,u.find('?'));if(path=="/state")send(c,200,json(),"application/json; charset=utf-8");else if(path=="/obs-player.js")send(c,200,SDK,"application/javascript; charset=utf-8");else if(path=="/ping")send(c,200,"{\"ok\":true}","application/json");else if(path.rfind("/p/",0)==0){auto z=path.find('/',3);if(z==std::string::npos){send(c,404,"Not Found","text/plain");}else{auto in=get(path.substr(3,z-3));if(!in){send(c,404,"Not Found","text/plain");}else{auto rel=dec(path.substr(z+1));if(rel=="__version"){try{send(c,200,std::to_string(fs::last_write_time(in->entry).time_since_epoch().count()),"text/plain");}catch(...){send(c,404,"Not Found","text/plain");}}else{if(rel.empty())rel=in->entry.filename().string();fs::path out;if(!safe(in->root,fs::path(rel),out)||!fs::is_regular_file(out)){send(c,404,"Not Found","text/plain");}else{auto e=out.extension().string();std::transform(e.begin(),e.end(),e.begin(),[](unsigned char x){return(char)std::tolower(x);});file(c,out,e==".html"||e==".htm");}}}}}}else send(c,404,"Not Found","text/plain");}closesocket(c);}}
-void start(){if(run.exchange(true))return;WSADATA w{};if(WSAStartup(MAKEWORD(2,2),&w)!=0){run=false;return;}srv=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);sockaddr_in a{};a.sin_family=AF_INET;a.sin_port=htons(PORT);inet_pton(AF_INET,"127.0.0.1",&a.sin_addr);if(srv==INVALID_SOCKET||bind(srv,(sockaddr*)&a,sizeof(a))||listen(srv,16)){if(srv!=INVALID_SOCKET)closesocket(srv);srv=INVALID_SOCKET;run=false;WSACleanup();blog(LOG_ERROR,"[obs-html-player] local server bind failed");return;}server_thread=std::thread(server_loop);smtc_thread=std::thread(smtc_loop);}
-void stop(){if(!run.exchange(false))return;if(srv!=INVALID_SOCKET){shutdown(srv,SD_BOTH);closesocket(srv);srv=INVALID_SOCKET;}if(server_thread.joinable())server_thread.join();if(smtc_thread.joinable())smtc_thread.join();std::lock_guard<std::mutex>l(im);insts.clear();WSACleanup();}
-struct Source{obs_source_t*src=nullptr;obs_source_t*browser=nullptr;std::shared_ptr<Inst>inst;int w=800,h=250;};
-std::string id(obs_source_t*s){std::ostringstream o;o<<std::hex<<(uintptr_t)s;return o.str();}
-void rebuild(Source*s,obs_data_t*d){const char*f=obs_data_get_string(d,"local_file");if(!f||!*f)return;fs::path e;try{e=fs::weakly_canonical(f);if(!fs::is_regular_file(e))return;}catch(...){return;}auto in=std::make_shared<Inst>();in->id=id(s->src);in->entry=e;in->root=e.parent_path();{std::lock_guard<std::mutex>l(im);insts[in->id]=in;}obs_data_t*b=obs_data_create();std::string url="http://127.0.0.1:"+std::to_string(PORT)+"/p/"+in->id+"/";obs_data_set_bool(b,"is_local_file",false);obs_data_set_string(b,"url",url.c_str());obs_data_set_int(b,"width",obs_data_get_int(d,"width"));obs_data_set_int(b,"height",obs_data_get_int(d,"height"));obs_data_set_int(b,"fps_num",obs_data_get_int(d,"fps_num"));obs_data_set_int(b,"fps_den",1);obs_data_set_bool(b,"shutdown",obs_data_get_bool(d,"shutdown"));obs_data_set_bool(b,"reroute_audio",false);obs_data_set_string(b,"css","html,body{margin:0;background:transparent;}");auto nb=obs_source_create_private("browser_source","HTML Player Browser",b);obs_data_release(b);if(!nb){std::lock_guard<std::mutex>l(im);insts.erase(in->id);blog(LOG_ERROR,"[obs-html-player] browser_source unavailable");return;}if(s->browser){obs_source_remove_active_child(s->src,s->browser);obs_source_release(s->browser);}s->browser=nb;s->inst=in;obs_source_add_active_child(s->src,s->browser);}
-void*create(obs_data_t*d,obs_source_t*x){auto*s=new Source;s->src=x;s->w=(int)obs_data_get_int(d,"width");s->h=(int)obs_data_get_int(d,"height");start();rebuild(s,d);return s;}void destroy(void*p){auto*s=(Source*)p;if(s->browser){obs_source_remove_active_child(s->src,s->browser);obs_source_release(s->browser);}if(s->inst){std::lock_guard<std::mutex>l(im);insts.erase(s->inst->id);}delete s;}void update(void*p,obs_data_t*d){auto*s=(Source*)p;s->w=(int)obs_data_get_int(d,"width");s->h=(int)obs_data_get_int(d,"height");rebuild(s,d);}uint32_t width(void*p){return((Source*)p)->w;}uint32_t height(void*p){return((Source*)p)->h;}void render(void*p,gs_effect_t*){auto*s=(Source*)p;if(s->browser)obs_source_video_render(s->browser);}obs_properties_t*props(void*){auto*p=obs_properties_create();obs_properties_add_path(p,"local_file","HTML 文件",OBS_PATH_FILE,"HTML (*.html;*.htm)",nullptr);obs_properties_add_int(p,"width","宽度",1,7680,1);obs_properties_add_int(p,"height","高度",1,7680,1);obs_properties_add_int(p,"fps_num","FPS",1,120,1);obs_properties_add_bool(p,"shutdown","隐藏时关闭页面");return p;}void defaults(obs_data_t*d){obs_data_set_default_int(d,"width",800);obs_data_set_default_int(d,"height",250);obs_data_set_default_int(d,"fps_num",60);obs_data_set_default_bool(d,"shutdown",false);}const char*name(void*){return"HTML Now Playing";}obs_source_info info{};
+constexpr unsigned short PORT = 38765;
+constexpr int POLL_MS = 250;
+constexpr size_t MAX_FILE = 16 * 1024 * 1024;
+
+struct State {
+    bool has = false;
+    bool playing = false;
+    std::string title, artist, album, source, art;
+    double duration = 0;
+    double position = 0;
+};
+
+struct Inst {
+    std::string id;
+    fs::path root;
+    fs::path entry;
+};
+
+std::mutex state_mutex;
+std::mutex instance_mutex;
+State current_state;
+std::map<std::string, std::weak_ptr<Inst>> instances;
+std::atomic_bool running = false;
+SOCKET server_socket = INVALID_SOCKET;
+std::thread server_thread;
+std::thread smtc_thread;
+
+const char *SDK = R"JS((()=>{
+const m=location.pathname.match(/^\/p\/([^/]+)\//),id=m?m[1]:'',o=location.origin,e=o+'/state',v=id?o+'/p/'+id+'/__version':'';
+let S={hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},V=null,L=new Map;
+const emit=(n,x)=>(L.get(n)||[]).forEach(f=>{try{f(x)}catch(_){}});
+const upd=x=>{const q=S;S=Object.assign({hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},x||{});if(q.title!==S.title||q.artist!==S.artist||q.album!==S.album||q.source!==S.source)emit('trackchange',S);if(q.playing!==S.playing)emit(S.playing?'play':'pause',S);if(q.hasTrack!==S.hasTrack)emit(S.hasTrack?'trackchange':'stop',S);if(q.albumArt!==S.albumArt)emit('albumart',S.albumArt);emit('state',S)};
+async function refresh(){try{const r=await fetch(e+'?t='+Date.now(),{cache:'no-store'});if(r.ok)upd(await r.json())}catch(_){}}
+async function checkVersion(){if(!v)return;try{const r=await fetch(v+'?t='+Date.now(),{cache:'no-store'});if(!r.ok)return;const n=await r.text();if(V!==null&&n!==V)location.reload();V=n}catch(_) {}}
+function loop(){refresh().finally(()=>setTimeout(loop,250))} function versionLoop(){checkVersion().finally(()=>setTimeout(versionLoop,1000))}
+window.obsPlayer={get state(){return S},get playerId(){return id},get endpoint(){return e},on(n,f){if(!L.has(n))L.set(n,new Set);L.get(n).add(f);return()=>L.get(n)?.delete(f)},once(n,f){const x=this.on(n,y=>{x();f(y)});return x},refresh,getProgress(){return S.duration?Math.max(0,Math.min(1,S.position/S.duration)):0},getPosition(){if(!S.playing||!S.timestamp)return S.position;const now=performance.timeOrigin/1000+performance.now()/1000;return Math.max(0,Math.min(S.duration||Infinity,S.position+now-S.timestamp))}};
+window.OBSPlayer=window.obsPlayer;emit('ready',S);loop();versionLoop();
+})();)JS";
+
+std::string escape_json(const std::string &s) {
+    std::ostringstream out;
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"': out << "\\\""; break;
+        case '\\': out << "\\\\"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (c < 32) out << "\\u" << std::hex << std::setw(4) << std::setfill('0') << (int)c;
+            else out << c;
+        }
+    }
+    return out.str();
 }
-extern "C" void html_source_register(){info.id="html_now_playing_source";info.type=OBS_SOURCE_TYPE_INPUT;info.output_flags=OBS_SOURCE_VIDEO;info.get_name=name;info.create=create;info.destroy=destroy;info.update=update;info.get_width=width;info.get_height=height;info.get_properties=props;info.get_defaults=defaults;info.video_render=render;obs_register_source(&info);}extern "C" void html_source_unregister(){stop();}
+
+std::string base64(const uint8_t *data, size_t size) {
+    static const char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((size + 2) / 3 * 4);
+    for (size_t i = 0; i < size; i += 3) {
+        uint32_t v = uint32_t(data[i]) << 16;
+        if (i + 1 < size) v |= uint32_t(data[i + 1]) << 8;
+        if (i + 2 < size) v |= data[i + 2];
+        out += table[(v >> 18) & 63];
+        out += table[(v >> 12) & 63];
+        out += i + 1 < size ? table[(v >> 6) & 63] : '=';
+        out += i + 2 < size ? table[v & 63] : '=';
+    }
+    return out;
+}
+
+std::string image_mime(const std::string &content_type) {
+    if (content_type == "image/png") return "image/png";
+    if (content_type == "image/webp") return "image/webp";
+    if (content_type == "image/gif") return "image/gif";
+    return "image/jpeg";
+}
+
+void smtc_loop() {
+    try {
+        init_apartment(apartment_type::multi_threaded);
+        auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+
+        while (running) {
+            State next;
+            try {
+                auto sessions = manager.GetSessions();
+                GlobalSystemMediaTransportControlsSession selected = nullptr;
+
+                const uint32_t count = sessions.Size();
+                for (uint32_t i = 0; i < count; ++i) {
+                    auto session = sessions.GetAt(i);
+                    const std::string app = to_string(session.SourceAppUserModelId());
+                    if (app.find("spotify") != std::string::npos ||
+                        app.find("youtube") != std::string::npos ||
+                        app.find("ytm") != std::string::npos ||
+                        app.find("applemusic") != std::string::npos ||
+                        app.find("cider") != std::string::npos ||
+                        app.find("vlc") != std::string::npos ||
+                        app.find("chrome") != std::string::npos ||
+                        app.find("msedge") != std::string::npos ||
+                        app.find("firefox") != std::string::npos ||
+                        app.find("opera") != std::string::npos ||
+                        app.find("brave") != std::string::npos) {
+                        selected = session;
+                        break;
+                    }
+                }
+
+                if (selected) {
+                    auto properties = selected.TryGetMediaPropertiesAsync().get();
+                    auto timeline = selected.GetTimelineProperties();
+                    auto playback = selected.GetPlaybackInfo();
+
+                    if (properties && playback) {
+                        next.has = true;
+                        next.playing = playback.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing;
+                        next.title = to_string(properties.Title());
+                        next.artist = to_string(properties.Artist());
+                        next.album = to_string(properties.AlbumTitle());
+                        next.source = to_string(selected.SourceAppUserModelId());
+                        next.duration = std::max(0.0, std::chrono::duration<double>(timeline.EndTime() - timeline.StartTime()).count());
+                        next.position = std::max(0.0, std::chrono::duration<double>(timeline.Position()).count());
+
+                        auto thumbnail = properties.Thumbnail();
+                        if (thumbnail) {
+                            auto stream = thumbnail.OpenReadAsync().get();
+                            const uint32_t size = static_cast<uint32_t>(stream.Size());
+                            if (size > 0 && size <= MAX_FILE) {
+                                DataReader reader(stream);
+                                reader.LoadAsync(size).get();
+                                std::vector<uint8_t> bytes(size);
+                                reader.ReadBytes(array_view<uint8_t>(bytes.data(), bytes.data() + bytes.size()));
+                                next.art = "data:" + image_mime(to_string(stream.ContentType())) + ";base64," + base64(bytes.data(), bytes.size());
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+                // Keep polling even when a media session disappears between calls.
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state_mutex);
+                current_state = std::move(next);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(POLL_MS));
+        }
+        uninit_apartment();
+    } catch (...) {
+        blog(LOG_ERROR, "[obs-html-player] SMTC initialization failed");
+    }
+}
+
+std::string state_json() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const double timestamp = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::ostringstream out;
+    out << "{\"hasTrack\":" << (current_state.has ? "true" : "false")
+        << ",\"playing\":" << (current_state.playing ? "true" : "false")
+        << ",\"paused\":" << (!current_state.playing && current_state.has ? "true" : "false")
+        << ",\"stopped\":" << (!current_state.has ? "true" : "false")
+        << ",\"title\":\"" << escape_json(current_state.title)
+        << "\",\"artist\":\"" << escape_json(current_state.artist)
+        << "\",\"album\":\"" << escape_json(current_state.album)
+        << "\",\"source\":\"" << escape_json(current_state.source)
+        << "\",\"duration\":" << current_state.duration
+        << ",\"position\":" << current_state.position
+        << ",\"timestamp\":" << timestamp
+        << ",\"albumArt\":\"" << escape_json(current_state.art) << "\"}";
+    return out.str();
+}
+
+std::string url_decode(const std::string &input) {
+    std::string out;
+    for (size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '%' && i + 2 < input.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int a = hex(input[i + 1]);
+            const int b = hex(input[i + 2]);
+            if (a >= 0 && b >= 0) {
+                out.push_back(static_cast<char>(a * 16 + b));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(input[i]);
+    }
+    return out;
+}
+
+bool safe_path(const fs::path &root, const fs::path &relative, fs::path &output) {
+    try {
+        const auto base = fs::weakly_canonical(root);
+        const auto candidate = fs::weakly_canonical(root / relative);
+        const auto a = base.native();
+        const auto b = candidate.native();
+        if (b.size() < a.size() || b.compare(0, a.size(), a) != 0)
+            return false;
+        if (b.size() > a.size() && b[a.size()] != fs::path::preferred_separator)
+            return false;
+        output = candidate;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string mime_type(const fs::path &path) {
+    std::string ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (ext == ".html" || ext == ".htm") return "text/html; charset=utf-8";
+    if (ext == ".css") return "text/css; charset=utf-8";
+    if (ext == ".js" || ext == ".mjs") return "application/javascript; charset=utf-8";
+    if (ext == ".json") return "application/json; charset=utf-8";
+    if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".png") return "image/png";
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".webp") return "image/webp";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".ico") return "image/x-icon";
+    if (ext == ".woff") return "font/woff";
+    if (ext == ".woff2") return "font/woff2";
+    if (ext == ".ttf") return "font/ttf";
+    if (ext == ".otf") return "font/otf";
+    return "application/octet-stream";
+}
+
+void send_response(SOCKET client, int code, const std::string &body, const char *content_type) {
+    const char *reason = code == 200 ? "OK" : code == 403 ? "Forbidden" : code == 404 ? "Not Found" : "Bad Request";
+    std::ostringstream header;
+    header << "HTTP/1.1 " << code << " " << reason << "\r\n"
+           << "Content-Type: " << content_type << "\r\n"
+           << "Access-Control-Allow-Origin: *\r\n"
+           << "Cache-Control: no-store\r\n"
+           << "Content-Length: " << body.size() << "\r\n"
+           << "Connection: close\r\n\r\n";
+    const std::string h = header.str();
+    ::send(client, h.data(), static_cast<int>(h.size()), 0);
+    if (!body.empty()) ::send(client, body.data(), static_cast<int>(body.size()), 0);
+}
+
+void send_file(SOCKET client, const fs::path &path, bool html) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) { send_response(client, 404, "Not Found", "text/plain"); return; }
+    const auto size = fs::file_size(path);
+    if (size > MAX_FILE) { send_response(client, 403, "File too large", "text/plain"); return; }
+    std::string body((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (html) {
+        const std::string injection = "<script src=\"/obs-player.js\"></script><style>html,body{margin:0;background:transparent}</style>";
+        const size_t head = body.find("</head>");
+        if (head == std::string::npos) body = injection + body;
+        else body.insert(head, injection);
+    }
+    send_response(client, 200, body, mime_type(path).c_str());
+}
+
+std::shared_ptr<Inst> find_instance(const std::string &id) {
+    std::lock_guard<std::mutex> lock(instance_mutex);
+    const auto it = instances.find(id);
+    if (it == instances.end()) return {};
+    auto value = it->second.lock();
+    if (!value) instances.erase(it);
+    return value;
+}
+
+void server_loop() {
+    while (running) {
+        sockaddr_in address{};
+        int address_length = sizeof(address);
+        SOCKET client = accept(server_socket, reinterpret_cast<sockaddr *>(&address), &address_length);
+        if (client == INVALID_SOCKET) continue;
+
+        char buffer[8192]{};
+        const int received = recv(client, buffer, sizeof(buffer) - 1, 0);
+        if (received > 0) {
+            const std::string request(buffer, received);
+            const std::string line = request.substr(0, request.find("\r\n"));
+            if (line.rfind("GET ", 0) != 0) {
+                send_response(client, 400, "Bad Request", "text/plain");
+            } else {
+                const size_t space = line.find(' ', 4);
+                const std::string url = line.substr(4, space - 4);
+                const std::string path = url.substr(0, url.find('?'));
+
+                if (path == "/state") {
+                    send_response(client, 200, state_json(), "application/json; charset=utf-8");
+                } else if (path == "/obs-player.js") {
+                    send_response(client, 200, SDK, "application/javascript; charset=utf-8");
+                } else if (path == "/ping") {
+                    send_response(client, 200, "{\"ok\":true}", "application/json");
+                } else if (path.rfind("/p/", 0) == 0) {
+                    const size_t slash = path.find('/', 3);
+                    if (slash == std::string::npos) {
+                        send_response(client, 404, "Not Found", "text/plain");
+                    } else {
+                        auto instance = find_instance(path.substr(3, slash - 3));
+                        if (!instance) {
+                            send_response(client, 404, "Not Found", "text/plain");
+                        } else {
+                            std::string relative = url_decode(path.substr(slash + 1));
+                            if (relative == "__version") {
+                                try {
+                                    send_response(client, 200, std::to_string(fs::last_write_time(instance->entry).time_since_epoch().count()), "text/plain");
+                                } catch (...) {
+                                    send_response(client, 404, "Not Found", "text/plain");
+                                }
+                            } else {
+                                if (relative.empty()) relative = instance->entry.filename().string();
+                                fs::path output;
+                                if (!safe_path(instance->root, relative, output) || !fs::is_regular_file(output)) {
+                                    send_response(client, 404, "Not Found", "text/plain");
+                                } else {
+                                    std::string ext = output.extension().string();
+                                    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+                                    send_file(client, output, ext == ".html" || ext == ".htm");
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    send_response(client, 404, "Not Found", "text/plain");
+                }
+            }
+        }
+        closesocket(client);
+    }
+}
+
+void start_server() {
+    if (running.exchange(true)) return;
+    WSADATA data{};
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) { running = false; return; }
+
+    server_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(PORT);
+    inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+
+    if (server_socket == INVALID_SOCKET || bind(server_socket, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0 || listen(server_socket, 16) != 0) {
+        if (server_socket != INVALID_SOCKET) closesocket(server_socket);
+        server_socket = INVALID_SOCKET;
+        running = false;
+        WSACleanup();
+        blog(LOG_ERROR, "[obs-html-player] local server bind failed");
+        return;
+    }
+
+    server_thread = std::thread(server_loop);
+    smtc_thread = std::thread(smtc_loop);
+}
+
+void stop_server() {
+    if (!running.exchange(false)) return;
+    if (server_socket != INVALID_SOCKET) {
+        shutdown(server_socket, SD_BOTH);
+        closesocket(server_socket);
+        server_socket = INVALID_SOCKET;
+    }
+    if (server_thread.joinable()) server_thread.join();
+    if (smtc_thread.joinable()) smtc_thread.join();
+    { std::lock_guard<std::mutex> lock(instance_mutex); instances.clear(); }
+    WSACleanup();
+}
+
+struct Source {
+    obs_source_t *source = nullptr;
+    obs_source_t *browser = nullptr;
+    std::shared_ptr<Inst> instance;
+    int width = 800;
+    int height = 250;
+};
+
+std::string source_id(obs_source_t *source) {
+    std::ostringstream out;
+    out << std::hex << reinterpret_cast<uintptr_t>(source);
+    return out.str();
+}
+
+void rebuild_browser(Source *source, obs_data_t *settings) {
+    const char *file_name = obs_data_get_string(settings, "local_file");
+    if (!file_name || !*file_name) return;
+
+    fs::path entry;
+    try {
+        entry = fs::weakly_canonical(fs::path(file_name));
+        if (!fs::is_regular_file(entry)) return;
+    } catch (...) { return; }
+
+    auto instance = std::make_shared<Inst>();
+    instance->id = source_id(source->source);
+    instance->entry = entry;
+    instance->root = entry.parent_path();
+    { std::lock_guard<std::mutex> lock(instance_mutex); instances[instance->id] = instance; }
+    source->instance = instance;
+
+    if (source->browser) {
+        obs_source_remove_active_child(source->source, source->browser);
+        obs_source_release(source->browser);
+        source->browser = nullptr;
+    }
+
+    obs_data_t *browser_settings = obs_data_create();
+    const std::string url = "http://127.0.0.1:" + std::to_string(PORT) + "/p/" + instance->id + "/";
+    obs_data_set_bool(browser_settings, "is_local_file", false);
+    obs_data_set_string(browser_settings, "url", url.c_str());
+    obs_data_set_int(browser_settings, "width", source->width);
+    obs_data_set_int(browser_settings, "height", source->height);
+    obs_data_set_bool(browser_settings, "fps_custom", true);
+    obs_data_set_int(browser_settings, "fps", 60);
+    obs_data_set_bool(browser_settings, "shutdown", false);
+    obs_data_set_bool(browser_settings, "restart_when_active", false);
+    obs_data_set_string(browser_settings, "css", "html,body{margin:0;background:transparent;overflow:hidden}");
+
+    source->browser = obs_source_create_private("browser_source", "HTML Player Browser", browser_settings);
+    obs_data_release(browser_settings);
+
+    if (source->browser) {
+        obs_source_add_active_child(source->source, source->browser);
+    } else {
+        blog(LOG_ERROR, "[obs-html-player] obs-browser source is unavailable");
+    }
+}
+
+const char *source_get_name(void *) { return "HTML Now Playing"; }
+
+void *source_create(obs_data_t *settings, obs_source_t *source) {
+    auto *data = new Source();
+    data->source = source;
+    data->width = (int)obs_data_get_int(settings, "width");
+    data->height = (int)obs_data_get_int(settings, "height");
+    if (data->width <= 0) data->width = 800;
+    if (data->height <= 0) data->height = 250;
+    rebuild_browser(data, settings);
+    return data;
+}
+
+void source_destroy(void *ptr) {
+    auto *data = static_cast<Source *>(ptr);
+    if (!data) return;
+    if (data->browser) {
+        obs_source_remove_active_child(data->source, data->browser);
+        obs_source_release(data->browser);
+    }
+    delete data;
+}
+
+void source_update(void *ptr, obs_data_t *settings) {
+    auto *data = static_cast<Source *>(ptr);
+    if (!data) return;
+    const int width = (int)obs_data_get_int(settings, "width");
+    const int height = (int)obs_data_get_int(settings, "height");
+    const bool changed = width != data->width || height != data->height ||
+                         std::string(obs_data_get_string(settings, "local_file")) != (data->instance ? data->instance->entry.string() : "");
+    data->width = width > 0 ? width : 800;
+    data->height = height > 0 ? height : 250;
+    if (changed) rebuild_browser(data, settings);
+}
+
+uint32_t source_width(void *ptr) { return static_cast<uint32_t>(static_cast<Source *>(ptr)->width); }
+uint32_t source_height(void *ptr) { return static_cast<uint32_t>(static_cast<Source *>(ptr)->height); }
+
+void source_video_render(void *ptr, gs_effect_t *) {
+    auto *data = static_cast<Source *>(ptr);
+    if (data && data->browser) obs_source_video_render(data->browser);
+}
+
+obs_properties_t *source_properties(void *) {
+    obs_properties_t *props = obs_properties_create();
+    obs_properties_add_path(props, "local_file", "HTML file", OBS_PATH_FILE, "HTML files (*.html *.htm);;All files (*.*)", nullptr);
+    obs_properties_add_int(props, "width", "Width", 1, 7680, 1);
+    obs_properties_add_int(props, "height", "Height", 1, 4320, 1);
+    return props;
+}
+
+obs_source_info source_info = {};
+
+} // namespace
+
+void html_source_register(void) {
+    start_server();
+    source_info.id = "html_now_playing_source";
+    source_info.type = OBS_SOURCE_TYPE_INPUT;
+    source_info.output_flags = OBS_SOURCE_VIDEO;
+    source_info.get_name = source_get_name;
+    source_info.create = source_create;
+    source_info.destroy = source_destroy;
+    source_info.update = source_update;
+    source_info.get_width = source_width;
+    source_info.get_height = source_height;
+    source_info.video_render = source_video_render;
+    source_info.get_properties = source_properties;
+    obs_register_source(&source_info);
+}
+
+void html_source_unregister(void) {
+    stop_server();
+}
