@@ -10,7 +10,7 @@
 </head>
 <body>
 <div class="card" id="card"><img class="cover" id="cover"><div class="meta"><div class="title" id="title">Waiting for media…</div><div class="artist" id="artist">OBS HTML Player</div><div class="album" id="album"></div><div class="track"><div class="bar" id="bar"></div></div><div class="status" id="status">Waiting for Windows media session</div></div></div>
-<script src="../../data/obs-plugins/obs-html-player/obs-player.js"></script>
+<script src="http://127.0.0.1:38765/obs-player.js"></script>
 <script>
 const $=id=>document.getElementById(id);let s=obsPlayer.state;
 function render(v){s=v;$('title').textContent=v.title||'Waiting for media…';$('artist').textContent=v.artist||'OBS HTML Player';$('album').textContent=v.album||'';$('status').textContent=v.hasTrack?(v.playing?'Playing':'Paused')+' · '+(v.source||'SMTC'):'Waiting for Windows media session';if(v.albumArt)$('cover').src=v.albumArt;else $('cover').removeAttribute('src');}
