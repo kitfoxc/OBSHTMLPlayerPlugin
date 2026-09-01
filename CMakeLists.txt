@@ -1,4 +1,4 @@
-set(PLUGIN_AUTHOR "lingerie goat")
+set(PLUGIN_AUTHOR "kitfoxc")
 
 cmake_minimum_required(VERSION 3.28...3.30)
 
@@ -16,7 +16,7 @@ include(helpers)
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs gdiplus shlwapi)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE OBS::libobs ws2_32)
 
 if(ENABLE_FRONTEND_API)
   find_package(obs-frontend-api REQUIRED)
@@ -36,23 +36,25 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/spotify-source.cpp src/spotify-source.h )
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+  src/plugin-main.c
+  src/html-player-source.cpp
+  src/html-player-source.h
+)
 
 if(MSVC)
-  set_source_files_properties(src/spotify-source.cpp PROPERTIES COMPILE_OPTIONS /EHa)
+  set_source_files_properties(src/html-player-source.cpp PROPERTIES COMPILE_OPTIONS /EHa)
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
 set(_obs_layout_dir "${CMAKE_BINARY_DIR}/Plugin_Release")
-set(_zip_name "OBSSpotifyNativePlugin${PLUGIN_VERSION_RAW}.zip")
+set(_zip_name "OBSHTMLPlayerPlugin${PLUGIN_VERSION_RAW}.zip")
 
 add_custom_command(
   TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E rm -rf
-          "${_obs_layout_dir}"
-  COMMAND ${CMAKE_COMMAND} -E make_directory
-          "${_obs_layout_dir}/obs-plugins/64bit"
+  COMMAND ${CMAKE_COMMAND} -E rm -rf "${_obs_layout_dir}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${_obs_layout_dir}/obs-plugins/64bit"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>"
           "${_obs_layout_dir}/obs-plugins/64bit/${_name}.dll"
@@ -61,6 +63,6 @@ add_custom_command(
           "${_obs_layout_dir}/data/obs-plugins/${_name}"
   COMMAND ${CMAKE_COMMAND} -E chdir "${_obs_layout_dir}"
           ${CMAKE_COMMAND} -E tar cf "${_zip_name}" --format=zip -- obs-plugins data
-  COMMENT "Assembling and zipping OBS plugin package in ${_obs_layout_dir}"
+  COMMENT "Assembling and zipping OBS HTML Player plugin package in ${_obs_layout_dir}"
   VERBATIM
 )
