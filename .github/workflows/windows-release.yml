@@ -1,0 +1,38 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [html-player-v0.1]
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-ci-x64
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-ci-x64 --config Release --parallel
+
+      - name: Verify release package
+        shell: pwsh
+        run: |
+          $zips = Get-ChildItem -Path build_x64 -Recurse -Filter '*.zip' | Where-Object { $_.FullName -like '*Plugin_Release*' }
+          if ($zips.Count -eq 0) { throw 'No OBS plugin ZIP was generated.' }
+          $zips | ForEach-Object { Write-Host $_.FullName }
+
+      - name: Upload OBS ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-html-player-windows-x64
+          path: build_x64/Plugin_Release/*.zip
+          if-no-files-found: error
