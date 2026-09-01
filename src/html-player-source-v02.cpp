@@ -58,7 +58,7 @@ std::thread server_thread;
 std::thread smtc_thread;
 
 const char *SDK = R"JS((()=>{
-const m=location.pathname.match(/^\/p\/([^/]+)\//),id=m?m[1]:'',o=location.origin,e=o+'/state',v=id?o+'/p/'+id+'/__version':'';
+const BASE='http://127.0.0.1:38765',m=location.pathname.match(/^\/p\/([^/]+)\//),id=m?m[1]:'',o=/^https?:$/.test(location.protocol)?location.origin:BASE,e=o+'/state',v=id?o+'/p/'+id+'/__version':'';
 let S={hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},V=null,L=new Map;
 const emit=(n,x)=>(L.get(n)||[]).forEach(f=>{try{f(x)}catch(_){}});
 const upd=x=>{const q=S;S=Object.assign({hasTrack:false,playing:false,paused:false,stopped:true,title:'',artist:'',album:'',source:'',duration:0,position:0,timestamp:0,albumArt:''},x||{});if(q.title!==S.title||q.artist!==S.artist||q.album!==S.album||q.source!==S.source)emit('trackchange',S);if(q.playing!==S.playing)emit(S.playing?'play':'pause',S);if(q.hasTrack!==S.hasTrack)emit(S.hasTrack?'trackchange':'stop',S);if(q.albumArt!==S.albumArt)emit('albumart',S.albumArt);emit('state',S)};
@@ -285,7 +285,7 @@ void send_file(SOCKET client, const fs::path &path, bool html) {
     if (size > MAX_FILE) { send_response(client, 403, "File too large", "text/plain"); return; }
     std::string body((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     if (html) {
-        const std::string injection = "<script src=\"/obs-player.js\"></script><style>html,body{margin:0;background:transparent}</style>";
+        const std::string injection = "<script src=\"http://127.0.0.1:38765/obs-player.js\"></script><style>html,body{margin:0;background:transparent}</style>";
         const size_t head = body.find("</head>");
         if (head == std::string::npos) body = injection + body;
         else body.insert(head, injection);
