@@ -111,7 +111,27 @@ constexpr int DEFAULT_VHS_TRACKING_MAX_THICKNESS_PX = 4;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MIN_PX = 1.0;
 constexpr double DEFAULT_VHS_TRACKING_JITTER_MAX_PX = 4.5;
 constexpr double DEFAULT_VHS_TRACKING_BRIGHTEN = 0.00; // 0..1
-constexpr double VHS_CHROMA_MAX_SHIFT_PX = 10.0;       // full-scale (100) horizontal split for each channel
+constexpr double VHS_CHROMA_MAX_SHIFT_PX = 40.0;       // full-scale (100) horizontal split for each channel
+constexpr int DEFAULT_VHS_SMEAR_AMOUNT = 10;            // 0..100
+constexpr double VHS_SMEAR_MAX_TAPS = 20.0;            // longest streak reach at 100 (doubled)
+constexpr double VHS_SMEAR_TAP_STEP_PX = 1.15;         // px between each streak tap
+constexpr double VHS_SMEAR_TAP_DECAY = 0.78;           // per-tap weight falloff
+constexpr double VHS_SMEAR_MAX_RIPPLE_PX = 6.0;        // max wobble amplitude at 100 (doubled)
+constexpr double VHS_SMEAR_BURST_SPLIT_PX = 12.0;      // max standalone red/blue split during a burst at 100
+constexpr double VHS_SMEAR_NOISE_BAND_PX = 16.0;       // coarse noise wavelength, px
+constexpr double VHS_SMEAR_NOISE_BAND2_PX = 6.0;       // fine noise wavelength, px (adds texture/chaos)
+constexpr double VHS_SMEAR_NOISE_BAND3_PX = 2.5;       // extra-fine, fast-moving wavelength, px (jittery chaos)
+constexpr double VHS_SMEAR_PHASE_SPEED = 0.35;         // noise "time" advance per animation tick (faster = quicker ripple)
+constexpr double VHS_SMEAR_BAND_MIN_FRAC = 0.10;       // burst band height, min fraction of card height
+constexpr double VHS_SMEAR_BAND_MAX_FRAC = 0.25;       // burst band height, max fraction of card height
+constexpr double VHS_SMEAR_BAND_MIN_PX = 20.0;         // burst band height floor, so small cards still show it
+constexpr double DEFAULT_VHS_SMEAR_BURST_MIN_S = 3.0;          // shortest plateau (full-strength) duration
+constexpr double DEFAULT_VHS_SMEAR_BURST_MAX_S = 6.0;          // longest plateau (full-strength) duration
+constexpr double VHS_SMEAR_FADE_IN_S = 0.5;               // ramp in/out duration, on top of the plateau duration
+constexpr double VHS_SMEAR_FADE_OUT_S = 0.3;
+constexpr double DEFAULT_VHS_SMEAR_MIN_INTERVAL_S = 2.0;            // shortest gap between bursts
+constexpr double DEFAULT_VHS_SMEAR_MAX_INTERVAL_S = 6.0;            // longest gap between bursts
+constexpr double VHS_SMEAR_EDGE_FEATHER_PX = 8.0;      // soft fade-in/out width at the band's top/bottom edges
 constexpr int DEFAULT_VHS_GLITCH_CHANCE_PCT = 8;
 constexpr int DEFAULT_VHS_GLITCH_MAX_BANDS = 4;
 constexpr int DEFAULT_VHS_GRAIN_AMOUNT = 50;
@@ -742,6 +762,11 @@ struct GlitchChannelBlock {
 	X(std::string, card_style, "none") \
 	X(int, vhs_intensity, DEFAULT_VHS_INTENSITY) \
 	X(int, vhs_chroma_aberration, DEFAULT_VHS_CHROMA_ABERRATION) \
+	X(int, vhs_smear_amount, DEFAULT_VHS_SMEAR_AMOUNT) \
+	X(double, vhs_smear_burst_min_s, DEFAULT_VHS_SMEAR_BURST_MIN_S) \
+	X(double, vhs_smear_burst_max_s, DEFAULT_VHS_SMEAR_BURST_MAX_S) \
+	X(double, vhs_smear_min_interval_s, DEFAULT_VHS_SMEAR_MIN_INTERVAL_S) \
+	X(double, vhs_smear_max_interval_s, DEFAULT_VHS_SMEAR_MAX_INTERVAL_S) \
 	X(int, vhs_scanline_spacing, DEFAULT_VHS_SCANLINE_SPACING_PX) \
 	X(int, vhs_scanline_intensity, DEFAULT_VHS_SCANLINE_INTENSITY) \
 	X(int, vhs_tracking_min_interval_s, DEFAULT_VHS_TRACKING_MIN_INTERVAL_S) \
@@ -857,6 +882,14 @@ struct spotify_source {
 	std::chrono::steady_clock::time_point last_vhs_tick{};
 	std::mt19937 vhs_rng{std::random_device{}()};
 	int vhs_scanline_offset = 0;
+	float vhs_smear_phase = 0.0f;
+	bool vhs_smear_active = false;
+	int vhs_smear_band_y = 0;
+	int vhs_smear_band_h = 0;
+	std::chrono::steady_clock::time_point vhs_smear_burst_start{}; 
+	std::chrono::steady_clock::time_point vhs_smear_plateau_end{}; 
+	std::chrono::steady_clock::time_point vhs_smear_burst_end{};   
+	std::chrono::steady_clock::time_point vhs_smear_next_start{};
 	int vhs_noise_offset_x = 0;
 	int vhs_noise_offset_y = 0;
 	bool vhs_glitch_active = false;
@@ -899,6 +932,8 @@ struct spotify_source {
 	int cached_bitmap_h = 0;
 
 	std::vector<uint8_t> overlay_scratch_pixels;
+	std::vector<uint8_t> vhs_ca_red_blur_scratch;
+	std::vector<uint8_t> vhs_ca_blue_blur_scratch;
 
 	std::vector<std::array<uint8_t, 4>> glitch_sort_scratch;
 
@@ -1236,43 +1271,149 @@ static void DrawVhsOverlay(Graphics &g, Bitmap &card, spotify_source *ctx, Graph
 	g.SetClip(&clipPath);
 
 	REAL ca = std::clamp(s.vhs_chroma_aberration, 0, 100) / 100.0f;
-	if (ca > 0.0f && cardW > 0 && cardH > 0) {
+	REAL smearT = std::clamp(s.vhs_smear_amount, 0, 100) / 100.0f;
+
+	double smearEnvelope = 0.0;
+	if (smearT > 0.0f && ctx->vhs_smear_active) {
+		auto nowDraw = std::chrono::steady_clock::now();
+		double fadeInS = std::max(0.05, VHS_SMEAR_FADE_IN_S);
+		double fadeOutS = std::max(0.05, VHS_SMEAR_FADE_OUT_S);
+		double sinceStart = std::chrono::duration<double>(nowDraw - ctx->vhs_smear_burst_start).count();
+		double untilEnd = std::chrono::duration<double>(ctx->vhs_smear_burst_end - nowDraw).count();
+		double p;
+		if (sinceStart < fadeInS)
+			p = std::clamp(sinceStart / fadeInS, 0.0, 1.0);
+		else if (untilEnd < fadeOutS)
+			p = std::clamp(untilEnd / fadeOutS, 0.0, 1.0);
+		else
+			p = 1.0;
+		smearEnvelope = p * p * (3.0 - 2.0 * p); // smoothstep
+	}
+	bool smearBurstNow = smearEnvelope > 0.0;
+	if ((ca > 0.0f || smearBurstNow) && cardW > 0 && cardH > 0) {
+		int rowStart = 0, rowEnd = cardH;
+		if (ca <= 0.0f && smearBurstNow) {
+			int margin = (int)std::ceil(VHS_SMEAR_EDGE_FEATHER_PX) + 1;
+			rowStart = std::clamp(ctx->vhs_smear_band_y - margin, 0, cardH);
+			rowEnd = std::clamp(ctx->vhs_smear_band_y + ctx->vhs_smear_band_h + margin, 0, cardH);
+		}
+
 		BitmapData bd;
 		Rect full(0, 0, cardW, cardH);
-		if (card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
+		if (rowEnd > rowStart && card.LockBits(&full, ImageLockModeRead, PixelFormat32bppARGB, &bd) == Ok) {
 			ctx->overlay_scratch_pixels.resize((size_t)cardW * cardH * 4);
 			std::vector<uint8_t> &src = ctx->overlay_scratch_pixels;
 			const uint8_t *srcRow = (const uint8_t *)bd.Scan0;
-			for (int y = 0; y < cardH; y++)
+			for (int y = rowStart; y < rowEnd; y++)
 				memcpy(src.data() + (size_t)y * cardW * 4, srcRow + (size_t)y * bd.Stride, (size_t)cardW * 4);
 			card.UnlockBits(&bd);
 
 			REAL maxOffsetPx = (REAL)VHS_CHROMA_MAX_SHIFT_PX * ca;
 
-			double rdx = -(double)maxOffsetPx; 
-			double bdx = (double)maxOffsetPx;  
+			double rdxGlobal = -(double)maxOffsetPx; // visually shifts red left
+			double bdxGlobal = (double)maxOffsetPx;  // visually shifts blue right
 
-			auto sampleChannel = [&](double x, int y, int channel) -> uint8_t {
+			int blurRadius = std::clamp((int)std::lround((double)maxOffsetPx * 0.15), 1, 4);
+			ctx->vhs_ca_red_blur_scratch.resize((size_t)cardW * cardH);
+			ctx->vhs_ca_blue_blur_scratch.resize((size_t)cardW * cardH);
+			std::vector<uint8_t> &redBlur = ctx->vhs_ca_red_blur_scratch;
+			std::vector<uint8_t> &blueBlur = ctx->vhs_ca_blue_blur_scratch;
+			for (int y = rowStart; y < rowEnd; y++) {
+				const uint8_t *rowSrc = &src[(size_t)y * cardW * 4];
+				uint8_t *redRow = &redBlur[(size_t)y * cardW];
+				uint8_t *blueRow = &blueBlur[(size_t)y * cardW];
+				for (int x = 0; x < cardW; x++) {
+					int rSum = 0, bSum = 0, n = 0;
+					int lo = std::max(0, x - blurRadius);
+					int hi = std::min(cardW - 1, x + blurRadius);
+					for (int xx = lo; xx <= hi; xx++) {
+						const uint8_t *p = rowSrc + (size_t)xx * 4;
+						bSum += p[0];
+						rSum += p[2];
+						n++;
+					}
+					redRow[x] = (uint8_t)(rSum / n);
+					blueRow[x] = (uint8_t)(bSum / n);
+				}
+			}
+
+			auto samplePlane = [&](const std::vector<uint8_t> &plane, double x, int y) -> uint8_t {
 				y = std::clamp(y, 0, cardH - 1);
 				int x0 = (int)std::floor(x);
 				int x1 = x0 + 1;
 				double fx = x - x0;
-				const uint8_t *rowSrc = &src[(size_t)y * cardW * 4];
-				double v0 = (x0 >= 0 && x0 < cardW) ? (double)rowSrc[(size_t)x0 * 4 + (size_t)channel] : 0.0;
-				double v1 = (x1 >= 0 && x1 < cardW) ? (double)rowSrc[(size_t)x1 * 4 + (size_t)channel] : 0.0;
+				double v0 = (x0 >= 0 && x0 < cardW) ? (double)plane[(size_t)y * cardW + (size_t)x0] : 0.0;
+				double v1 = (x1 >= 0 && x1 < cardW) ? (double)plane[(size_t)y * cardW + (size_t)x1] : 0.0;
 				return (uint8_t)std::lround(v0 + (v1 - v0) * fx);
+			};
+
+			int smearTaps = smearT > 0.0f ? std::clamp((int)std::lround((double)smearT * VHS_SMEAR_MAX_TAPS), 1, (int)VHS_SMEAR_MAX_TAPS) : 0;
+			double rippleAmp = (double)smearT * VHS_SMEAR_MAX_RIPPLE_PX;
+			double burstSplitPx = (double)smearT * VHS_SMEAR_BURST_SPLIT_PX;
+			double t = (double)ctx->vhs_smear_phase;
+
+			auto latticeHash = [](int i, int salt) -> float {
+				uint32_t h = (uint32_t)(i * 374761393 + salt * 668265263);
+				h = (h ^ (h >> 13)) * 1274126177u;
+				h ^= h >> 16;
+				return (float)(h & 0xFFFFFFu) / (float)0x1000000u; // [0,1)
+			};
+			auto valueNoise1D = [&](float pos, int salt) -> float {
+				int i0 = (int)std::floor(pos);
+				float f = pos - (float)i0;
+				float sm = f * f * (3.0f - 2.0f * f); // smoothstep
+				float v0 = latticeHash(i0, salt);
+				float v1 = latticeHash(i0 + 1, salt);
+				return v0 + (v1 - v0) * sm; // [0,1)
+			};
+			auto chaosWave = [&](float y, int salt) -> float {
+				float n1 = valueNoise1D(y / (float)VHS_SMEAR_NOISE_BAND_PX + (float)t * 0.6f, salt);
+				float n2 = valueNoise1D(y / (float)VHS_SMEAR_NOISE_BAND2_PX + (float)t * 1.7f, salt + 97);
+				float n3 = valueNoise1D(y / (float)VHS_SMEAR_NOISE_BAND3_PX + (float)t * 3.1f, salt + 251);
+				return n1 * 0.5f + n2 * 0.3f + n3 * 0.2f; // [0,1), irregular / non-periodic
+			};
+			auto smearBandFactor = [&](int y) -> float {
+				if (!smearBurstNow)
+					return 0.0f;
+				float top = (float)ctx->vhs_smear_band_y;
+				float bot = (float)(ctx->vhs_smear_band_y + ctx->vhs_smear_band_h);
+				float feather = std::max(1.0f, (float)VHS_SMEAR_EDGE_FEATHER_PX);
+				float f = std::min((float)y - top, bot - (float)y) / feather;
+				f = std::clamp(f, 0.0f, 1.0f);
+				return f * f * (3.0f - 2.0f * f);
+			};
+
+			auto sampleSmeared = [&](const std::vector<uint8_t> &plane, double baseX, int y, double dirSign, int salt, float bandF) -> uint8_t {
+				if (bandF <= 0.001f)
+					return samplePlane(plane, baseX, y);
+				double ripple = rippleAmp * ((double)chaosWave((float)y, salt) * 2.0 - 1.0) * (double)bandF;
+				uint8_t base = samplePlane(plane, baseX + ripple, y);
+				int taps = (int)std::lround(smearTaps * (double)bandF);
+				if (taps <= 0)
+					return base;
+				double sum = (double)base, wsum = 1.0;
+				for (int i = 1; i <= taps; i++) {
+					double w = std::pow(VHS_SMEAR_TAP_DECAY, (double)i);
+					double sampleX = baseX + ripple + dirSign * (double)i * VHS_SMEAR_TAP_STEP_PX;
+					sum += (double)samplePlane(plane, sampleX, y) * w;
+					wsum += w;
+				}
+				return (uint8_t)std::lround(sum / wsum);
 			};
 
 			if (card.LockBits(&full, ImageLockModeWrite, PixelFormat32bppARGB, &bd) == Ok) {
 				uint8_t *dstBase = (uint8_t *)bd.Scan0;
-				for (int y = 0; y < cardH; y++) {
+				for (int y = rowStart; y < rowEnd; y++) {
+					float bandF = smearBandFactor(y) * (float)smearEnvelope;  // spatial x temporal fade, combined
+					double rdxRow = rdxGlobal - burstSplitPx * (double)bandF; // red trails further left inside the band
+					double bdxRow = bdxGlobal + burstSplitPx * (double)bandF; // blue trails further right inside the band
 					uint8_t *row = dstBase + (size_t)y * bd.Stride;
 					for (int x = 0; x < cardW; x++) {
 						size_t origIdx = ((size_t)y * cardW + (size_t)x) * 4;
 						uint8_t *px = row + (size_t)x * 4;
-						px[0] = sampleChannel(x + bdx, y, 0);
+						px[0] = sampleSmeared(blueBlur, x + bdxRow, y, 1.0, 11, bandF);
 						px[1] = src[origIdx + 1];
-						px[2] = sampleChannel(x + rdx, y, 2);
+						px[2] = sampleSmeared(redBlur, x + rdxRow, y, -1.0, 29, bandF);
 						px[3] = src[origIdx + 3];
 					}
 				}
@@ -2446,6 +2587,8 @@ static void poll_loop(spotify_source *ctx)
 							int scanlineSpacing = std::max(1, s.vhs_scanline_spacing);
 							ctx->vhs_scanline_offset = (ctx->vhs_scanline_offset + 1) % scanlineSpacing;
 
+							ctx->vhs_smear_phase = std::fmod(ctx->vhs_smear_phase + (float)VHS_SMEAR_PHASE_SPEED, 100000.0f);
+
 							std::uniform_real_distribution<double> glitchChance(0.0, 1.0);
 							ctx->vhs_glitch_active = glitchChance(ctx->vhs_rng) < (s.vhs_glitch_chance_pct / 100.0);
 							if (ctx->vhs_glitch_active) {
@@ -2480,6 +2623,37 @@ static void poll_loop(spotify_source *ctx)
 									ctx->vhs_tracking_active = false;
 									ctx->vhs_tracking_next_start = now + std::chrono::milliseconds(intervalDist(ctx->vhs_rng));
 								}
+							}
+
+							if (s.vhs_smear_amount <= 0) {
+								ctx->vhs_smear_active = false;
+								ctx->vhs_smear_next_start = std::chrono::steady_clock::time_point{};
+							} else if (!ctx->vhs_smear_active) {
+								if (ctx->vhs_smear_next_start == std::chrono::steady_clock::time_point{}) {									
+									std::uniform_real_distribution<double> smearGapDist(ctx->vhs_smear_min_interval_s, ctx->vhs_smear_max_interval_s);
+									ctx->vhs_smear_next_start = now + std::chrono::milliseconds((int)(smearGapDist(ctx->vhs_rng) * 1000.0));
+								} else if (now >= ctx->vhs_smear_next_start) {
+									int cardHpx = std::max(1, s.card_h);
+									int minH = std::min(cardHpx, std::max((int)std::lround(VHS_SMEAR_BAND_MIN_PX), (int)std::lround(cardHpx * VHS_SMEAR_BAND_MIN_FRAC)));
+									int maxH = std::min(cardHpx, std::max(minH, (int)std::lround(cardHpx * VHS_SMEAR_BAND_MAX_FRAC)));
+									std::uniform_int_distribution<int> bandHDist(minH, maxH);
+									int bandH = bandHDist(ctx->vhs_rng);
+									std::uniform_int_distribution<int> bandYDist(0, std::max(0, cardHpx - bandH));
+									ctx->vhs_smear_band_y = bandYDist(ctx->vhs_rng);
+									ctx->vhs_smear_band_h = bandH;
+									ctx->vhs_smear_active = true;
+									ctx->vhs_smear_burst_start = now;
+									std::uniform_real_distribution<double> smearBurstDist(ctx->vhs_smear_burst_min_s, ctx->vhs_smear_burst_max_s);
+									auto fadeInMs = std::chrono::milliseconds((int)(VHS_SMEAR_FADE_IN_S * 1000.0));
+									auto fadeOutMs = std::chrono::milliseconds((int)(VHS_SMEAR_FADE_OUT_S * 1000.0));
+									auto plateauMs = std::chrono::milliseconds((int)(smearBurstDist(ctx->vhs_rng) * 1000.0));
+									ctx->vhs_smear_plateau_end = now + fadeInMs + plateauMs;
+									ctx->vhs_smear_burst_end = ctx->vhs_smear_plateau_end + fadeOutMs;
+								}
+							} else if (now >= ctx->vhs_smear_burst_end) {
+								ctx->vhs_smear_active = false;
+								std::uniform_real_distribution<double> smearGapDist(ctx->vhs_smear_min_interval_s, ctx->vhs_smear_max_interval_s);
+								ctx->vhs_smear_next_start = now + std::chrono::milliseconds((int)(smearGapDist(ctx->vhs_rng) * 1000.0));
 							}
 
 							needCompose = true;
@@ -2674,7 +2848,7 @@ static const char *spotify_source_get_name(void *)
 // ---------------------------------------------------------------------
 
 static const char *const kSettingsIntKeys[] = {
-	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur", "vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount", "eightmm_intensity", "eightmm_light_leak_intensity", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count", "duotone_shadow_color", "duotone_highlight_color", "duotone_intensity", "bw_desaturation", "bw_contrast", "glitch_intensity", "glitch_pixel_sort_chance", "glitch_pixel_sort_max_rows", "glitch_pixel_sort_threshold", "glitch_tear_chance", "glitch_tear_max_count", "glitch_tear_max_height", "glitch_tear_max_offset", "glitch_tear_duplicate_chance", "glitch_channel_block_chance", "glitch_channel_block_max_count", "glitch_channel_block_max_size", "glitch_channel_block_max_offset",
+	"title_color", "artist_color", "bg_color", "bg_opacity", "background_corner_radius", "album_art_corner_radius", "card_width", "card_height", "text_offset_y", "progress_bar_gap", "progress_bar_height", "scroll_speed_ms", "vu_color", "vu_update_ms", "vu_randomness", "vu_width", "vu_height", "vu_bar_count", "progress_fill_color", "progress_bg_color", "autohide_after_s", "title_outline_size", "title_outline_color", "artist_outline_size", "artist_outline_color", "album_art_bg_blur", "vhs_intensity", "vhs_chroma_aberration", "vhs_smear_amount", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount", "eightmm_intensity", "eightmm_light_leak_intensity", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count", "duotone_shadow_color", "duotone_highlight_color", "duotone_intensity", "bw_desaturation", "bw_contrast", "glitch_intensity", "glitch_pixel_sort_chance", "glitch_pixel_sort_max_rows", "glitch_pixel_sort_threshold", "glitch_tear_chance", "glitch_tear_max_count", "glitch_tear_max_height", "glitch_tear_max_offset", "glitch_tear_duplicate_chance", "glitch_channel_block_chance", "glitch_channel_block_max_count", "glitch_channel_block_max_size", "glitch_channel_block_max_offset",
 };
 
 static const char *const kSettingsBoolKeys[] = {
@@ -2688,7 +2862,7 @@ static const char *const kSettingsStringKeys[] = {
 };
 
 static const char *const kSettingsDoubleKeys[] = {
-	"vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
+	"vhs_smear_burst_min_s", "vhs_smear_burst_max_s", "vhs_smear_min_interval_s", "vhs_smear_max_interval_s", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_weave_px", "eightmm_flicker", "bw_vignette_strength",
 };
 
 static const char *const kSettingsObjKeys[] = {
@@ -2810,6 +2984,15 @@ static void apply_settings(spotify_source *ctx, obs_data_t *settings)
 
 	ctx->vhs_chroma_aberration = (int)obs_data_get_int(settings, "vhs_chroma_aberration");
 	ctx->vhs_chroma_aberration = std::clamp(ctx->vhs_chroma_aberration, 0, 100);
+
+	ctx->vhs_smear_amount = (int)obs_data_get_int(settings, "vhs_smear_amount");
+	ctx->vhs_smear_amount = std::clamp(ctx->vhs_smear_amount, 0, 100);
+
+	ctx->vhs_smear_burst_min_s = std::max(1.0, obs_data_get_double(settings, "vhs_smear_burst_min_s"));
+	ctx->vhs_smear_burst_max_s = std::max(ctx->vhs_smear_burst_min_s, obs_data_get_double(settings, "vhs_smear_burst_min_s"));
+
+	ctx->vhs_smear_min_interval_s = std::max(1.0, obs_data_get_double(settings, "vhs_smear_min_interval_s"));
+	ctx->vhs_smear_max_interval_s = std::max(ctx->vhs_smear_max_interval_s, obs_data_get_double(settings, "vhs_smear_min_interval_s"));
 
 	ctx->vhs_scanline_spacing = std::max(1, (int)obs_data_get_int(settings, "vhs_scanline_spacing"));
 	ctx->vhs_scanline_intensity = std::clamp((int)obs_data_get_int(settings, "vhs_scanline_intensity"), 0, 100);
@@ -3002,6 +3185,11 @@ static void spotify_source_defaults(obs_data_t *settings)
 	obs_data_set_default_string(settings, "card_style", "none");
 	obs_data_set_default_int(settings, "vhs_intensity", DEFAULT_VHS_INTENSITY);
 	obs_data_set_default_int(settings, "vhs_chroma_aberration", DEFAULT_VHS_CHROMA_ABERRATION);
+	obs_data_set_default_int(settings, "vhs_smear_amount", DEFAULT_VHS_SMEAR_AMOUNT);
+	obs_data_set_default_double(settings, "vhs_smear_burst_min_s", DEFAULT_VHS_SMEAR_BURST_MIN_S);
+	obs_data_set_default_double(settings, "vhs_smear_burst_max_s", DEFAULT_VHS_SMEAR_BURST_MAX_S);
+	obs_data_set_default_double(settings, "vhs_smear_min_interval_s", DEFAULT_VHS_SMEAR_MIN_INTERVAL_S);
+	obs_data_set_default_double(settings, "vhs_smear_max_interval_s", DEFAULT_VHS_SMEAR_MAX_INTERVAL_S);
 	obs_data_set_default_int(settings, "vhs_scanline_spacing", DEFAULT_VHS_SCANLINE_SPACING_PX);
 	obs_data_set_default_int(settings, "vhs_scanline_intensity", DEFAULT_VHS_SCANLINE_INTENSITY);
 	obs_data_set_default_int(settings, "vhs_tracking_min_interval_s", DEFAULT_VHS_TRACKING_MIN_INTERVAL_S);
@@ -3119,6 +3307,19 @@ static bool autohide_enabled_modified(obs_properties_t *props, obs_property_t *,
 	return true;
 }
 
+static bool show_vu_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, "vu_meter_enabled");
+	obs_property_set_enabled(obs_properties_get(props, "vu_horizontal"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_color"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_update_ms"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_randomness"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_width"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_height"), enabled);
+	obs_property_set_enabled(obs_properties_get(props, "vu_bar_count"), enabled);
+	return true;
+}
+
 static bool title_outline_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
 	bool enabled = obs_data_get_bool(settings, "title_outline_enabled");
@@ -3166,7 +3367,7 @@ static bool card_style_modified(obs_properties_t *props, obs_property_t *, obs_d
 	bool isGlitch = style == "glitch";
 
 	static const char *const kVhsKeys[] = {
-		"vhs_intensity", "vhs_chroma_aberration", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount",
+		"vhs_intensity", "vhs_chroma_aberration", "vhs_smear_amount", "vhs_smear_burst_min_s", "vhs_smear_burst_max_s", "vhs_smear_min_interval_s", "vhs_smear_max_interval_s", "vhs_scanline_spacing", "vhs_scanline_intensity", "vhs_tracking_min_interval_s", "vhs_tracking_max_interval_s", "vhs_tracking_line_min_count", "vhs_tracking_line_max_count", "vhs_tracking_line_gap", "vhs_tracking_min_thickness", "vhs_tracking_max_thickness", "vhs_tracking_jitter_min", "vhs_tracking_jitter_max", "vhs_tracking_brighten", "vhs_glitch_chance_pct", "vhs_glitch_max_bands", "vhs_grain_amount",
 	};
 	static const char *const kEightMmKeys[] = {
 		"eightmm_intensity", "eightmm_vignette_strength", "eightmm_warmth", "eightmm_light_leak_alpha", "eightmm_light_leak_position", "eightmm_light_leak_intensity", "eightmm_weave_px", "eightmm_flicker", "eightmm_scratch_intensity", "eightmm_dust_intensity", "eightmm_scratch_max_count", "eightmm_dust_max_count",
@@ -3203,11 +3404,17 @@ static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 {
 	obs_properties_add_bool(props, "vertical_layout", obs_module_text("VerticalLayout"));
 	obs_properties_add_bool(props, "hide_album_art", obs_module_text("HideAlbumArt"));
+	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
+	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));	
 	obs_properties_add_bool(props, "track_change_animation_enabled", obs_module_text("TrackChangeAnimation"));
 	obs_properties_add_bool(props, "autohide_when_not_playing", obs_module_text("AutohideWhenNotPlaying"));
 	obs_property_t *autohide_prop = obs_properties_add_bool(props, "autohide_enabled", obs_module_text("AutohideEnabled"));
 	obs_properties_add_int(props, "autohide_after_s", obs_module_text("AutohideAfterSeconds"), 1, 3600, 1);
 	obs_property_set_modified_callback(autohide_prop, autohide_enabled_modified);
+	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
+	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
+	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
+	obs_properties_add_font(props, "artist_font", obs_module_text("ArtistFont"));
 	obs_properties_add_color_alpha(props, "title_color", obs_module_text("TitleColor"));
 	obs_properties_add_color_alpha(props, "artist_color", obs_module_text("ArtistColor"));
 
@@ -3220,7 +3427,7 @@ static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 	obs_properties_add_int(props, "artist_outline_size", obs_module_text("ArtistOutlineSize"), 1, 50, 1);
 	obs_properties_add_color_alpha(props, "artist_outline_color", obs_module_text("ArtistOutlineColor"));
 	obs_property_set_modified_callback(artist_outline_enabled_prop, artist_outline_enabled_modified);
-	obs_properties_add_bool(props, "show_album_name", obs_module_text("ShowAlbumName"));
+	
 	obs_property_t *use_album_art_as_bg_prop = obs_properties_add_bool(props, "use_album_art_as_bg", obs_module_text("UseAlbumArtAsBackground"));
 	obs_properties_add_int(props, "album_art_bg_blur", obs_module_text("AlbumArtBackgroundBlur"), 0, 100, 1);
 	obs_property_set_modified_callback(use_album_art_as_bg_prop, use_album_art_as_bg_modified);
@@ -3231,25 +3438,22 @@ static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 	obs_properties_add_int(props, "bg_opacity", obs_module_text("BackgroundOpacity"), 0, 100, 1);
 	obs_properties_add_int(props, "background_corner_radius", obs_module_text("BackgroundCornerRadius"), 1, 100, 1);
 	obs_properties_add_int(props, "album_art_corner_radius", obs_module_text("AlbumArtCornerRadius"), 1, 100, 1);
-	obs_properties_add_font(props, "title_font", obs_module_text("TitleFont"));
-	obs_properties_add_font(props, "artist_font", obs_module_text("ArtistFont"));
-	obs_properties_add_int(props, "card_width", obs_module_text("CardWidth"), 50, 4000, 10);
-	obs_properties_add_int(props, "card_height", obs_module_text("CardHeight"), 30, 2000, 10);
+	
 	obs_properties_add_int(props, "text_offset_y", obs_module_text("TextVerticalOffset"), -1000, 1000, 1);
-	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);
-	obs_properties_add_bool(props, "show_progress_bar", obs_module_text("ShowProgressBar"));
+	obs_properties_add_int(props, "scroll_speed_ms", obs_module_text("ScrollSpeed"), 50, 5000, 10);	
 	obs_properties_add_color_alpha(props, "progress_fill_color", obs_module_text("ProgressFillColor"));
 	obs_properties_add_color_alpha(props, "progress_bg_color", obs_module_text("ProgressBackgroundColor"));
 	obs_properties_add_int(props, "progress_bar_height", obs_module_text("ProgressBarHeight"), 2, 1000, 1);
 	obs_properties_add_int(props, "progress_bar_gap", obs_module_text("ProgressBarGap"), -1000, 1000, 1);
-	obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("ShowVUMeter"));
-	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VUMeterHorizontalOrientation"));
+	obs_property_t *vu_prop = obs_properties_add_bool(props, "vu_meter_enabled", obs_module_text("ShowVUMeter"));
+	obs_properties_add_bool(props, "vu_horizontal", obs_module_text("VUMeterHorizontalOrientation"));	
 	obs_properties_add_color_alpha(props, "vu_color", obs_module_text("VUMeterColor"));
 	obs_properties_add_int(props, "vu_update_ms", obs_module_text("VUUpdateSpeed"), 50, 2000, 10);
 	obs_properties_add_int(props, "vu_randomness", obs_module_text("VURandomness"), 0, 100, 5);
 	obs_properties_add_int(props, "vu_width", obs_module_text("VUMeterWidth"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_height", obs_module_text("VUMeterHeight"), 4, 2000, 1);
 	obs_properties_add_int(props, "vu_bar_count", obs_module_text("VUBarCount"), 1, VU_MAX_BAR_COUNT, 1);
+	obs_property_set_modified_callback(vu_prop, show_vu_modified);
 	obs_properties_add_bool(props, "show_goat_placeholder", obs_module_text("ShowGoatWhenNoAlbumArt"));
 	obs_properties_add_bool(props, "show_plugin_attribution", obs_module_text("ShowPluginAttribution"));
 
@@ -3263,6 +3467,12 @@ static void spotify_source_properties_impl(obs_properties_t *props, void *data)
 
 	obs_properties_add_int(props, "vhs_intensity", obs_module_text("VhsEffectIntensity"), 0, 100, 1);
 	obs_properties_add_int(props, "vhs_chroma_aberration", obs_module_text("VhsChromaticAberration"), 0, 100, 1);
+	obs_properties_add_int(props, "vhs_smear_amount", obs_module_text("VhsSmearAmount"), 0, 100, 1);
+	obs_properties_add_float(props, "vhs_smear_burst_min_s", obs_module_text("VhsSmearMinLength"), 1.0, 6000.0, 1.0);
+	obs_properties_add_float(props, "vhs_smear_burst_max_s", obs_module_text("VhsSmearMaxLength"), 1.0, 6000.0, 1.0);	
+	obs_properties_add_float(props, "vhs_smear_min_interval_s", obs_module_text("VhsSmearMinInterval"), 1.0, 6000.0, 1.0);
+	obs_properties_add_float(props, "vhs_smear_max_interval_s", obs_module_text("VhsSmearMaxInterval"), 1.0, 6000.0, 1.0);
+	
 	obs_properties_add_int(props, "vhs_grain_amount", obs_module_text("VhsGrainAmount"), 0, 100, 1);
 	obs_properties_add_int(props, "vhs_scanline_spacing", obs_module_text("VhsScanlineSpacing"), 1, 20, 1);
 	obs_properties_add_int(props, "vhs_scanline_intensity", obs_module_text("VhsScanlineIntensity"), 0, 100, 1);

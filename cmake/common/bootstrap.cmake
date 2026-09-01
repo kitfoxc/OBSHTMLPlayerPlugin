@@ -40,6 +40,7 @@ if("${CMAKE_CURRENT_BINARY_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   file(REMOVE_RECURSE "${CMAKE_CURRENT_SOURCE_DIR}/CMakeCache.txt" "${CMAKE_CURRENT_SOURCE_DIR}/CMakeFiles")
 endif()
 
+
 # Add common module directories to default search path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/common")
 
@@ -55,14 +56,33 @@ string(JSON _bundleId GET ${buildspec} platformConfig macos bundleId)
 set(PLUGIN_AUTHOR ${_author})
 set(PLUGIN_WEBSITE ${_website})
 set(PLUGIN_EMAIL ${_email})
-set(PLUGIN_VERSION ${_version})
 set(MACOS_BUNDLEID ${_bundleId})
+set(PLUGIN_VERSION_RAW "${_version}")
 
-string(REPLACE "." ";" _version_canonical "${_version}")
-list(GET _version_canonical 0 PLUGIN_VERSION_MAJOR)
-list(GET _version_canonical 1 PLUGIN_VERSION_MINOR)
-list(GET _version_canonical 2 PLUGIN_VERSION_PATCH)
-unset(_version_canonical)
+
+string(REGEX MATCH "^([0-9]+)\\.([0-9]+)(\\.([0-9]+))?(-([A-Za-z0-9.]+))?$" _version_match "${_version}")
+if(NOT _version_match)
+  message(FATAL_ERROR "buildspec.json version '${_version}' is invalid (expected e.g. 2.5, 2.5.1, or 2.5.1-beta)")
+endif()
+
+set(PLUGIN_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(PLUGIN_VERSION_MINOR "${CMAKE_MATCH_2}")
+if(CMAKE_MATCH_4)
+  set(PLUGIN_VERSION_PATCH "${CMAKE_MATCH_4}")
+else()
+  set(PLUGIN_VERSION_PATCH "0")
+endif()
+set(PLUGIN_VERSION_SUFFIX "${CMAKE_MATCH_6}")
+
+set(_version "${PLUGIN_VERSION_MAJOR}.${PLUGIN_VERSION_MINOR}.${PLUGIN_VERSION_PATCH}")
+
+if(PLUGIN_VERSION_SUFFIX)
+  set(PLUGIN_VERSION_FULL "${_version}-${PLUGIN_VERSION_SUFFIX}")
+else()
+  set(PLUGIN_VERSION_FULL "${_version}")
+endif()
+
+set(PLUGIN_VERSION "${PLUGIN_VERSION_FULL}")
 
 include(buildnumber)
 include(osconfig)

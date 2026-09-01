@@ -43,3 +43,24 @@ if(MSVC)
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+set(_obs_layout_dir "${CMAKE_BINARY_DIR}/Plugin_Release")
+set(_zip_name "OBSSpotifyNativePlugin${PLUGIN_VERSION_RAW}.zip")
+
+add_custom_command(
+  TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E rm -rf
+          "${_obs_layout_dir}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${_obs_layout_dir}/obs-plugins/64bit"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:${CMAKE_PROJECT_NAME}>"
+          "${_obs_layout_dir}/obs-plugins/64bit/${_name}.dll"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/data/obs-plugins/${_name}"
+          "${_obs_layout_dir}/data/obs-plugins/${_name}"
+  COMMAND ${CMAKE_COMMAND} -E chdir "${_obs_layout_dir}"
+          ${CMAKE_COMMAND} -E tar cf "${_zip_name}" --format=zip -- obs-plugins data
+  COMMENT "Assembling and zipping OBS plugin package in ${_obs_layout_dir}"
+  VERBATIM
+)
